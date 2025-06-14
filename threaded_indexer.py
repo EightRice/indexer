@@ -5,7 +5,6 @@ import logging
 import queue
 import threading
 import time
-
 from firebase_admin import credentials, firestore, initialize_app
 from web3 import Web3
 
