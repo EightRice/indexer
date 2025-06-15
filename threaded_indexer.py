@@ -10,10 +10,8 @@ from web3 import Web3
 
 from apps.homebase.paper import Paper
 
-
 def initialize_environment():
     """Initialize Firebase and Web3 environments.
-
     Returns
     -------
     tuple

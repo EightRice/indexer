@@ -1,4 +1,4 @@
-from apps.homebase.abis import wrapperAbi, daoAbiGlobal, tokenAbiGlobal, mint_function_abi, burn_function_abi # Add wrapper_w_abi if different
+from apps.homebase.abis import wrapperAbi, daoAbiGlobal, tokenAbiGlobal # Add wrapper_w_abi if different
 from datetime import datetime, timezone, timedelta # timedelta might be useful
 from apps.homebase.entities import ProposalStatus, Proposal, StateInContract, Txaction, Token, Member, Org, Vote
 import re
@@ -6,17 +6,7 @@ from web3 import Web3
 from google.cloud import firestore
 import codecs # Not used in current snippet, can remove if not needed elsewhere
 from apps.generic.converting import decode_function_parameters # Ensure this path is correct
-from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi, timelock_min_delay_abi, governor_proposal_threshold_abi, governor_voting_delay_abi, governor_voting_period_abi # Added more ABIs for fetching
-
-# It's good practice to define ABIs for functions you'll call, e.g., for fetching DAO settings
-# Ensure these are defined in eventSignatures.py or here
-# Example:
-# timelock_min_delay_abi = [{"constant":True,"inputs":[],"name":"getMinDelay","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":False,"stateMutability":"view","type":"function"}]
-# governor_proposal_threshold_abi = [{"constant":True,"inputs":[],"name":"proposalThreshold","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":False,"stateMutability":"view","type":"function"}]
-# governor_voting_delay_abi = [{"constant":True,"inputs":[],"name":"votingDelay","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":False,"stateMutability":"view","type":"function"}]
-# governor_voting_period_abi = [{"constant":True,"inputs":[],"name":"votingPeriod","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"payable":False,"stateMutability":"view","type":"function"}]
-# governor_timelock_abi = [{"constant":True,"inputs":[],"name":"timelock","outputs":[{"internalType":"address","name":"","type":"address"}],"payable":False,"stateMutability":"view","type":"function"}]
-# erc20_wrapper_underlying_abi = [{"constant":True,"inputs":[],"name":"underlying","outputs":[{"internalType":"address","name":"","type":"address"}],"payable":False,"stateMutability":"view","type":"function"}]
+from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi
 
 
 class Paper:
