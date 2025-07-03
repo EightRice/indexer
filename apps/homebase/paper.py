@@ -1,4 +1,4 @@
-from apps.homebase.abis import wrapperAbi, daoAbiGlobal, tokenAbiGlobal # Add wrapper_w_abi if different
+from apps.homebase.abis import wrapperAbi, daoAbiGlobal, tokenAbiGlobal, wrapper_token_abi,  timelock_min_delay_abi# Add wrapper_w_abi if different
 from datetime import datetime, timezone, timedelta # timedelta might be useful
 from apps.homebase.entities import ProposalStatus, Proposal, StateInContract, Txaction, Token, Member, Org, Vote
 import re
@@ -191,11 +191,9 @@ class Paper:
             # return None
             return None
 
-
         args = decoded_event['args']
         dao_name = args['daoName'] # This is also the wrapped token name
         print(f"New DAO (wrapped wrapper): {dao_name} from event")
-
         org = Org(name=dao_name)
         org.creationDate = datetime.now(timezone.utc)
         org.govTokenAddress = args['wrappedTokenAddress'] # This is the HBEVM_Wrapped_Token
@@ -204,21 +202,21 @@ class Paper:
         org.registryAddress = args['registryAddress']
         org.description = args['description']
         org.quorum = args['quorumFraction'] # Directly from event
-
-        # For wrapped tokens, initialMembers and initialAmounts are not applicable from event
-        org.holders = 0 # Or 1 if DAO deployer is considered a member initially
         
-        # Fetch decimals from the wrapped token
+        # For wrapped tokens, initialMembers and initialAmounts are not applicable from event
+        org.holders = 0 
         wrapped_token_contract = self.get_specific_contract(org.govTokenAddress, tokenAbiGlobal) # Assuming wrapped token has ERC20 interface
         if wrapped_token_contract:
             try:
                 org.decimals = wrapped_token_contract.functions.decimals().call()
                 # Total supply of wrapped token starts at 0, users need to wrap
                 org.totalSupply = str(wrapped_token_contract.functions.totalSupply().call())
+                org.underlyingToken = str(wrapped_token_contract.functions.underlying().call()) 
             except Exception as e:
                 print(f"Error fetching info for wrapped token {org.govTokenAddress}: {e}")
                 org.decimals = 18 # Default
                 org.totalSupply = "0"
+
         else:
             org.decimals = 18 # Default
             org.totalSupply = "0"
@@ -229,7 +227,7 @@ class Paper:
             try:
                 # Fetch proposalThreshold (ensure ABI for this is in daoAbiGlobal)
                 # It's often a large number, store as string
-                from apps.homebase.eventSignatures import governor_proposal_threshold_abi, governor_voting_delay_abi, governor_voting_period_abi, governor_timelock_abi
+                from apps.homebase.abis import governor_proposal_threshold_abi, governor_voting_delay_abi, governor_voting_period_abi, governor_timelock_abi
                 
                 raw_threshold = dao_contract.functions.proposalThreshold().call()
                 org.proposalThreshold = str(raw_threshold)
@@ -348,20 +346,14 @@ class Paper:
             print(f"Error committing batch for delegation in DAO {self.dao}: {e}")
         return None
 
-
     def propose(self, log):
-        # ... (propose logic should be mostly fine, ensure self.dao is correct) ...
         if not self.dao:
             print(f"DAO address not set for contract {self.address}, cannot process propose event.")
             return None
-        # Ensure self.token_paper is valid if used
-        if not self.token_paper or not self.token_paper.address:
-            print(f"Token paper or token address not set for DAO {self.dao}, cannot get token contract for totalSupply.")
-            # Decide on fallback or error
-            return None
 
         contract_instance = self.get_contract()
-        if not contract_instance: return None
+        if not contract_instance:
+            return None
         try:
             event = contract_instance.events.ProposalCreated().process_log(log)
         except Exception as e:
@@ -369,86 +361,88 @@ class Paper:
             return None
             
         proposal_id_raw = event["args"]["proposalId"]
-        proposal_id = str(proposal_id_raw) # Ensure it's a string for Firestore path
+        proposal_id = str(proposal_id_raw)
+
+        print(f"Processing new proposal {proposal_id} for DAO {self.dao}")
 
         proposer = Web3.to_checksum_address(event["args"]["proposer"])
-        # dao_address = Web3.to_checksum_address(event['address']) # event['address'] is the DAO contract emitting this
-        
         targets = [Web3.to_checksum_address(t) for t in event["args"]["targets"]]
-        values = [str(v) for v in event["args"]["values"]] # Ensure values are strings
-        # signatures = event["args"]["signatures"] # Not used in your current Proposal entity
+        values = [str(v) for v in event["args"]["values"]]
         calldatas_raw = event["args"]["calldatas"]
         calldatas = [cd.hex() if isinstance(cd, bytes) else str(cd) for cd in calldatas_raw]
-
 
         vote_start_block = event["args"]["voteStart"]
         vote_end_block = event["args"]["voteEnd"]
         description_full = event["args"]["description"]
         
         parts = description_full.split("0|||0")
-        if len(parts) >= 4 : # Changed to >= 4 for robustness, allowing extra parts if any
+        if len(parts) >= 4:
             name = parts[0] if parts[0] else "(No Title Provided)"
             type_ = parts[1] if parts[1] else "unknown"
-            desc = parts[2] if parts[2] else description_full # Fallback to full if parsing issue
+            desc = parts[2] if parts[2] else description_full
             link = parts[3] if parts[3] else "(No Link Provided)"
-        elif len(parts) == 1 and description_full: # If no delimiter, assume it's just a description
-            name = description_full[:80] # Take first 80 chars as title
+        elif len(parts) == 1 and description_full:
+            name = description_full[:80]
             type_ = "custom"
             desc = description_full
             link = "(No Link Provided)"
-        else: # Fallback for other cases
+        else:
             name = "(No Title Provided)"
             type_ = "unknown"
             desc = description_full if description_full else "(No Description Provided)"
             link = "(No Link Provided)"
 
-        # Create Org object temporarily or fetch minimal data if needed by Proposal
-        # For now, Proposal constructor takes org address (self.dao) which is a string
-        p = Proposal(name=name, org=self.dao) # self.dao is the DAO address string
+        p = Proposal(name=name, org=self.dao)
         p.author = proposer
-        p.id = proposal_id # This might be redundant if proposal_id is used as document ID
+        p.id = proposal_id
         p.type = type_
         p.targets = targets
         p.values = values
         p.description = desc
-        p.callDatas = calldatas # Storing as list of hex strings
-
-        # Get totalSupply from the correct token contract associated with this DAO
-        token_contract_for_dao = self.get_specific_contract(self.token_paper.address, tokenAbiGlobal)
-        if token_contract_for_dao:
-            try:
-                p.totalSupply = str(token_contract_for_dao.functions.totalSupply().call())
-            except Exception as e:
-                print(f"Error fetching totalSupply for proposal {proposal_id} from token {self.token_paper.address}: {e}")
-                p.totalSupply = "0" # Fallback
-        else:
-            p.totalSupply = "0"
-
-
-        p.createdAt = datetime.now(tz=timezone.utc) # Event timestamp might be better if available & reliable
+        p.callDatas = calldatas
+        p.createdAt = datetime.now(tz=timezone.utc)
         p.votingStartsBlock = str(vote_start_block)
         p.votingEndsBlock = str(vote_end_block)
         p.externalResource = link
         
+        # Gracefully fetch the historic total supply for the proposal snapshot
+        p.totalSupply = "0"  # Default value
+        if self.token_paper and self.token_paper.address:
+            token_contract_for_dao = self.get_specific_contract(self.token_paper.address, tokenAbiGlobal)
+            if token_contract_for_dao:
+                try:
+                    p.totalSupply = str(token_contract_for_dao.functions.getPastTotalSupply(vote_start_block).call())
+                except Exception as e:
+                    print(f"Warning: Could not fetch past total supply for proposal {proposal_id} from token {self.token_paper.address} at block {vote_start_block}. Error: {e}. Attempting to use current total supply.")
+                    try:
+                        p.totalSupply = str(token_contract_for_dao.functions.totalSupply().call())
+                    except Exception as e2:
+                        print(f"Error fetching current total supply for proposal {proposal_id}. Error: {e2}. Defaulting to '0'.")
+        else:
+            print(f"Warning: Token paper or token address not set for DAO {self.dao}. Proposal {proposal_id} will have totalSupply of '0'.")
+
         proposal_doc_ref = self.daos_collection.document(self.dao).collection('proposals').document(proposal_id)
         try:
             proposal_doc_ref.set(p.toJson())
 
             member_doc_ref = self.daos_collection.document(self.dao).collection('members').document(proposer)
-            # Ensure member exists before trying to update array union
             if member_doc_ref.get().exists:
                  member_doc_ref.update({"proposalsCreated": firestore.ArrayUnion([proposal_id])})
-            else: # Create member if they proposed but weren't listed (e.g. just got tokens)
+            else:
                 print(f"Proposer {proposer} not found. Creating member entry.")
-                # Try to get their balance for completeness
                 balance = "0"
-                if token_contract_for_dao:
-                    try:
-                        balance = str(token_contract_for_dao.functions.balanceOf(proposer).call())
-                    except: pass # Ignore if balance fetch fails
+                if self.token_paper and self.token_paper.address:
+                    token_contract_for_dao = self.get_specific_contract(self.token_paper.address, tokenAbiGlobal)
+                    if token_contract_for_dao:
+                        try:
+                            balance = str(token_contract_for_dao.functions.balanceOf(proposer).call())
+                        except:
+                            pass  # Ignore if balance fetch fails
                 new_member = Member(address=proposer, personalBalance=balance, delegate="", votingWeight="0")
                 new_member.proposalsCreated = [proposal_id]
                 member_doc_ref.set(new_member.toJson())
+            
+            print(f"Successfully saved proposal {proposal_id} to DAO {self.dao}")
 
         except Exception as e:
             print(f"Error saving proposal {proposal_id} or updating member {proposer} in DAO {self.dao}: {e}")
@@ -563,18 +557,17 @@ class Paper:
             return None
 
         proposal_id = str(event['args']['proposalId'])
-        eta = event['args']['eta'] # Execution timestamp
         
         proposal_doc_ref = self.daos_collection.document(self.dao).collection('proposals').document(proposal_id)
         
         # Convert ETA (timestamp) to datetime object
-        execution_datetime = datetime.fromtimestamp(eta, tz=timezone.utc)
+        
         
         try:
             proposal_doc_ref.update({
                 "statusHistory.queued": datetime.now(tz=timezone.utc), # Time of queuing
                 "latestStage": "Queued", # Assuming ProposalStatus enum has Queued
-                "executionStarts": execution_datetime # Store the ETA
+                
             })
             print(f"Proposal {proposal_id} queued in DAO {self.dao}, ETA: {execution_datetime}.")
         except Exception as e:

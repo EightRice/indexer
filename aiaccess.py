@@ -93,6 +93,7 @@ def is_excluded(path: Path, root_dir: Path,
           * preserve any directory whose path is a prefix of an include_dir
           * drop paths not matching include_spec
     """
+    
     if path == root_dir:
         return False
     try:

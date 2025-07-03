@@ -109,9 +109,11 @@ class Org:
         self.votingDuration: int = 0
         self.nativeBalance: str = "0"
         self.executionDelay: int = 0
+        self.underlyingToken: Optional[str] = None
 
     def toJson(self):
         return {
+            'underlyingToken': self.underlyingToken if self.underlyingToken else "None",
             'name': self.name,
             'creationDate': self.creationDate,
             'description': self.description,
@@ -132,6 +134,7 @@ class Org:
             'executionDelay': self.executionDelay,
             'quorum': self.quorum,
             'nonTransferrable': self.nonTransferrable,
+            'underlying': self.underlyingToken if self.underlyingToken else "None",
         }
 
 
