@@ -2,6 +2,7 @@ media/
 __pycache__/
 trustless.json
 homebase.json
+afterme.json
 contracts.txt
 .env
 .aiaccess
