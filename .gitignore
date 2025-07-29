@@ -1,6 +1,7 @@
 media/
 __pycache__/
 trustless.json
+trustless.ipynb
 homebase.json
 afterme.json
 secrets/
