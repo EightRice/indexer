@@ -3,6 +3,7 @@ __pycache__/
 trustless.json
 homebase.json
 afterme.json
+secrets/
 contracts.txt
 .env
 .aiaccess
