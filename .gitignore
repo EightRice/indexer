@@ -5,6 +5,9 @@ homebase.json
 afterme.json
 secrets/
 contracts.txt
+imdexer.md
+mediu/
+ethereum_accounts.csv
+homebase.ipynb
+dao.json
 .env
-.aiaccess
-aiaccess.py
