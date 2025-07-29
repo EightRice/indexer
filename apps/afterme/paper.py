@@ -62,12 +62,9 @@ class Paper:
                 print(f"Could not instantiate new Will contract at {will_address}")
                 return None
 
-            # Call getWillDetails to fetch initial state
-            # Response tuple: owner, interval, lastUpdate, executed, ...
             details = will_contract.functions.getWillDetails().call()
             owner, interval, last_update, executed = details[0], details[1], details[2], details[3]
 
-            # Create a Will entity and save to Firestore
             will_entity = Will(
                 address=will_address,
                 owner=Web3.to_checksum_address(owner),
@@ -78,7 +75,6 @@ class Paper:
             self.wills_collection.document(will_address).set(will_entity.to_firestore())
             print(f"Successfully stored new Will {will_address} in Firestore.")
             
-            # Return the new address to be added to the listener
             return will_address
 
         except Exception as e:
@@ -89,15 +85,13 @@ class Paper:
         """Handles the Ping event from a Will contract."""
         will_address = Web3.to_checksum_address(log['address'])
         print(f"Ping received for Will: {will_address}")
-        will_contract = self.get_contract() # self.address is the will_address here
+        will_contract = self.get_contract()
         if not will_contract: return
 
         try:
-            # Re-fetch details to ensure consistency, as requested
             details = will_contract.functions.getWillDetails().call()
             new_last_update_ts = details[2]
             
-            # Update the Firestore document
             update_data = {
                 'lastUpdate': datetime.fromtimestamp(new_last_update_ts, tz=timezone.utc),
                 'lastIndexed': datetime.now(timezone.utc)
@@ -111,14 +105,18 @@ class Paper:
     def handle_executed(self, log):
         """Handles the Executed event from a Will contract."""
         will_address = Web3.to_checksum_address(log['address'])
-        print(f"Execution reported for Will: {will_address}")
+        tx_hash = log['transactionHash'].hex()
+        print(f"Execution reported for Will: {will_address} in Tx: {tx_hash}")
         try:
+            # MODIFIED: Added 'transactionHash' to the update dictionary
             update_data = {
                 'executed': True,
+                'executionTime': datetime.now(timezone.utc),
+                'transactionHash': tx_hash,
                 'lastIndexed': datetime.now(timezone.utc)
             }
             self.wills_collection.document(will_address).update(update_data)
-            print(f"Marked Will {will_address} as executed.")
+            print(f"Marked Will {will_address} as executed with executionTime and txHash.")
         except Exception as e:
             print(f"Error marking Will {will_address} as executed: {e}")
 
@@ -129,9 +127,6 @@ class Paper:
         try:
             self.wills_collection.document(will_address).delete()
             print(f"Successfully deleted Will {will_address} from Firestore.")
-            # We don't need to return the address for removal from listening list
-            # because the loop will naturally stop seeing events from it.
-            # A more advanced indexer might remove it to save resources.
         except Exception as e:
             print(f"Error deleting Will {will_address}: {e}")
             
