@@ -23,7 +23,7 @@ from web3.exceptions import Web3RPCError
 
 # --- Safe Import for Discord Alerter ---
 try:
-    from generic.services import send_indexer_alert
+    from apps.generic.services import send_indexer_alert
     CAN_SEND_ALERTS = True
 except ImportError:
     print("WARNING: 'generic/services.py' not found. Discord alerts will be disabled.")
@@ -265,6 +265,11 @@ print(f"Listening for {len(event_signatures)} events on {len(listening_to_addres
 # --- Main Indexing Loop ---
 processed_transactions = set()
 heartbeat = 0
+# --- START OF CHANGE: Stateful Indexing Logic ---
+last_processed_block = 0
+BLOCK_HEADROOM = 3  # Query logs 3 blocks behind the head of the chain for safety
+MAX_BLOCK_RANGE = 100 # Process a maximum of 100 blocks at a time to not overload the RPC
+
 while True:
     heartbeat += 1
     try:
@@ -272,11 +277,34 @@ while True:
             print("No contracts to listen to. Waiting...")
             time.sleep(15)
             continue
-        latest = web3.eth.block_number
-        first = latest - 15 if latest > 15 else 0 
-        logs = web3.eth.get_logs({"fromBlock": first, "toBlock": latest, "address": listening_to_addresses})
+
+        latest_on_chain = web3.eth.block_number
+
+        # Initialize our block tracker on the first run.
+        if last_processed_block == 0:
+            last_processed_block = latest_on_chain - 15 # Start with the original 15-block window for the first time
+            print(f"Initializing indexer. Starting from block {last_processed_block}.")
+            continue
+
+        # Determine the range of blocks to scan in this iteration
+        from_block = last_processed_block + 1
+        to_block = latest_on_chain - BLOCK_HEADROOM
+
+        # If we are already caught up, just wait.
+        if from_block > to_block:
+            time.sleep(5)
+            continue
+
+        # If the indexer has been offline, process in manageable chunks.
+        if (to_block - from_block) > MAX_BLOCK_RANGE:
+            to_block = from_block + MAX_BLOCK_RANGE - 1
+            print(f"[{args.network.upper()}] Large gap detected. Processing chunk: {from_block} -> {to_block}")
+
+        logs = web3.eth.get_logs({"fromBlock": from_block, "toBlock": to_block, "address": listening_to_addresses})
+        
         if logs:
-            print(f"[{args.network.upper()}] Found {len(logs)} logs between blocks {first} and {latest}")
+            print(f"[{args.network.upper()}] Found {len(logs)} logs between blocks {from_block} and {to_block}")
+
         for log_entry in logs:
             tx_hash = log_entry["transactionHash"].hex()
             if tx_hash in processed_transactions: continue 
@@ -291,6 +319,8 @@ while True:
                 print(f"WARNING: Paper object not found for {contract_address}. Skipping event.")
                 continue
             new_contract_info = papers[contract_address].handle_event(log_entry, func=event_name)
+            
+            # This logic remains the same
             if new_contract_info == "DELETED":
                 print(f"Removing cleared will {contract_address} from active listeners.")
                 if contract_address in listening_to_addresses: listening_to_addresses.remove(contract_address)
@@ -315,6 +345,20 @@ while True:
                 if new_will_address not in papers:
                     papers.update({new_will_address: AftermePaper(address=new_will_address, kind="afterme_will", db=db_afterme, web3=web3, wills_collection_name=afterme_wills_collection_name)})
                 print(f"Now listening to {len(listening_to_addresses)} addresses.")
+
+        # IMPORTANT: Update our checkpoint after a successful run
+        last_processed_block = to_block
+        
+    except Web3RPCError as e:
+        # This is a more robust way to catch recoverable errors without crashing
+        error_message = str(e).lower()
+        is_recoverable_error = any(phrase in error_message for phrase in ["block range", "unavailable", "block limit", "server error"])
+        if is_recoverable_error:
+            print(f"WARN: Recoverable RPC error encountered: {e}. Waiting 10s before retry.")
+            time.sleep(10) # Wait a bit longer for the node to sort itself out
+        else:
+            # For other, more severe RPC errors, trigger the full reconnect
+            raise e
     except Exception as e:
         error_msg = f"MAIN LOOP ERROR: {e}"
         print(error_msg)
@@ -328,6 +372,11 @@ while True:
             print(f"Error during reconnection: {recon_e}")
             
     if heartbeat % 50 == 0:
-        print(f"[{args.network.upper()}] Heartbeat: {heartbeat}. Listening to {len(listening_to_addresses)} addresses on app(s): {args.app}.")
-    time.sleep(5)
+        print(f"[{args.network.upper()}] Heartbeat: {heartbeat}. Listening to {len(listening_to_addresses)} addresses on app(s): {args.app}. Current Block: {last_processed_block}")
+    
+    # Adjust sleep time based on whether we are catching up or fully synced
+    if (latest_on_chain - last_processed_block) > MAX_BLOCK_RANGE:
+        time.sleep(0.5) # Sleep less if we are catching up
+    else:
+        time.sleep(5)   # Normal 5-second sleep if we are near the head
 # indexer/app.py
