@@ -1,3 +1,5 @@
-!apps/afterme/
-!apps/homebase
+# homebase indexer-debug.aiaccess
 !app.py
+!apps/homebase/paper.py
+!apps/homebase/abis.py
+!apps/homebase/entities.py

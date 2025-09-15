@@ -5,15 +5,9 @@
 - indexer/
   - app.py
   - apps/
-    - afterme/
-      - abis.py
-      - entities.py
-      - paper.py
-      - paper.py.errors.txt
     - homebase/
       - abis.py
       - entities.py
-      - eventSignatures.py
       - paper.py
 
 ## File Contents
@@ -45,7 +39,7 @@ from web3.exceptions import Web3RPCError
 
 # --- Safe Import for Discord Alerter ---
 try:
-    from generic.services import send_indexer_alert
+    from apps.generic.services import send_indexer_alert
     CAN_SEND_ALERTS = True
 except ImportError:
     print("WARNING: 'generic/services.py' not found. Discord alerts will be disabled.")
@@ -287,6 +281,11 @@ print(f"Listening for {len(event_signatures)} events on {len(listening_to_addres
 # --- Main Indexing Loop ---
 processed_transactions = set()
 heartbeat = 0
+# --- START OF CHANGE: Stateful Indexing Logic ---
+last_processed_block = 0
+BLOCK_HEADROOM = 3  # Query logs 3 blocks behind the head of the chain for safety
+MAX_BLOCK_RANGE = 100 # Process a maximum of 100 blocks at a time to not overload the RPC
+
 while True:
     heartbeat += 1
     try:
@@ -294,11 +293,34 @@ while True:
             print("No contracts to listen to. Waiting...")
             time.sleep(15)
             continue
-        latest = web3.eth.block_number
-        first = latest - 15 if latest > 15 else 0 
-        logs = web3.eth.get_logs({"fromBlock": first, "toBlock": latest, "address": listening_to_addresses})
+
+        latest_on_chain = web3.eth.block_number
+
+        # Initialize our block tracker on the first run.
+        if last_processed_block == 0:
+            last_processed_block = latest_on_chain - 15 # Start with the original 15-block window for the first time
+            print(f"Initializing indexer. Starting from block {last_processed_block}.")
+            continue
+
+        # Determine the range of blocks to scan in this iteration
+        from_block = last_processed_block + 1
+        to_block = latest_on_chain - BLOCK_HEADROOM
+
+        # If we are already caught up, just wait.
+        if from_block > to_block:
+            time.sleep(5)
+            continue
+
+        # If the indexer has been offline, process in manageable chunks.
+        if (to_block - from_block) > MAX_BLOCK_RANGE:
+            to_block = from_block + MAX_BLOCK_RANGE - 1
+            print(f"[{args.network.upper()}] Large gap detected. Processing chunk: {from_block} -> {to_block}")
+
+        logs = web3.eth.get_logs({"fromBlock": from_block, "toBlock": to_block, "address": listening_to_addresses})
+        
         if logs:
-            print(f"[{args.network.upper()}] Found {len(logs)} logs between blocks {first} and {latest}")
+            print(f"[{args.network.upper()}] Found {len(logs)} logs between blocks {from_block} and {to_block}")
+
         for log_entry in logs:
             tx_hash = log_entry["transactionHash"].hex()
             if tx_hash in processed_transactions: continue 
@@ -313,6 +335,8 @@ while True:
                 print(f"WARNING: Paper object not found for {contract_address}. Skipping event.")
                 continue
             new_contract_info = papers[contract_address].handle_event(log_entry, func=event_name)
+            
+            # This logic remains the same
             if new_contract_info == "DELETED":
                 print(f"Removing cleared will {contract_address} from active listeners.")
                 if contract_address in listening_to_addresses: listening_to_addresses.remove(contract_address)
@@ -337,6 +361,20 @@ while True:
                 if new_will_address not in papers:
                     papers.update({new_will_address: AftermePaper(address=new_will_address, kind="afterme_will", db=db_afterme, web3=web3, wills_collection_name=afterme_wills_collection_name)})
                 print(f"Now listening to {len(listening_to_addresses)} addresses.")
+
+        # IMPORTANT: Update our checkpoint after a successful run
+        last_processed_block = to_block
+        
+    except Web3RPCError as e:
+        # This is a more robust way to catch recoverable errors without crashing
+        error_message = str(e).lower()
+        is_recoverable_error = any(phrase in error_message for phrase in ["block range", "unavailable", "block limit", "server error"])
+        if is_recoverable_error:
+            print(f"WARN: Recoverable RPC error encountered: {e}. Waiting 10s before retry.")
+            time.sleep(10) # Wait a bit longer for the node to sort itself out
+        else:
+            # For other, more severe RPC errors, trigger the full reconnect
+            raise e
     except Exception as e:
         error_msg = f"MAIN LOOP ERROR: {e}"
         print(error_msg)
@@ -350,437 +388,14 @@ while True:
             print(f"Error during reconnection: {recon_e}")
             
     if heartbeat % 50 == 0:
-        print(f"[{args.network.upper()}] Heartbeat: {heartbeat}. Listening to {len(listening_to_addresses)} addresses on app(s): {args.app}.")
-    time.sleep(5)
+        print(f"[{args.network.upper()}] Heartbeat: {heartbeat}. Listening to {len(listening_to_addresses)} addresses on app(s): {args.app}. Current Block: {last_processed_block}")
+    
+    # Adjust sleep time based on whether we are catching up or fully synced
+    if (latest_on_chain - last_processed_block) > MAX_BLOCK_RANGE:
+        time.sleep(0.5) # Sleep less if we are catching up
+    else:
+        time.sleep(5)   # Normal 5-second sleep if we are near the head
 # indexer/app.py
-```
-
-### `apps/afterme/abis.py`
-```py
-# indexer/apps/afterme/abis.py
-
-# ABI for the Source contract that creates Wills
-source_abi = '''
-[
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "user",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "willAddress",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "bool",
-        "name": "hasDiary",
-        "type": "bool"
-      }
-    ],
-    "name": "WillCreated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "user",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "willAddress",
-        "type": "address"
-      }
-    ],
-    "name": "WillCleared",
-    "type": "event"
-  }
-]
-'''
-
-# ABI for the individual Will contracts
-will_abi = '''
-[
-  {
-    "anonymous": false,
-    "inputs": [],
-    "name": "Cancelled",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": false,
-        "internalType": "address",
-        "name": "executor",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "ethFee",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "address",
-        "name": "feeRecipient",
-        "type": "address"
-      }
-    ],
-    "name": "Executed",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "newLastUpdate",
-        "type": "uint256"
-      }
-    ],
-    "name": "Ping",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "owner",
-        "type": "address"
-      }
-    ],
-    "name": "WillConfigured",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "owner",
-        "type": "address"
-      }
-    ],
-    "name": "WillEmptied",
-    "type": "event"
-  },
-  {
-    "inputs": [],
-    "name": "getWillDetails",
-    "outputs": [
-      {
-        "components": [
-          { "internalType": "address", "name": "owner", "type": "address" },
-          { "internalType": "uint256", "name": "interval", "type": "uint256" },
-          { "internalType": "uint256", "name": "lastUpdate", "type": "uint256" },
-          { "internalType": "bool", "name": "executed", "type": "bool" },
-          { "internalType": "bool", "name": "hasDiary", "type": "bool" },
-          { "internalType": "uint256", "name": "ethBalance", "type": "uint256" },
-          { "internalType": "address[]", "name": "heirs", "type": "address[]" },
-          { "internalType": "uint256[]", "name": "distributionPercentages", "type": "uint256[]" },
-          {
-            "components": [
-              { "internalType": "address", "name": "tokenContract", "type": "address" },
-              { "internalType": "uint256", "name": "balance", "type": "uint256" }
-            ],
-            "internalType": "struct Erc20Detail[]",
-            "name": "erc20Details",
-            "type": "tuple[]"
-          },
-          {
-            "components": [
-              { "internalType": "address", "name": "tokenContract", "type": "address" },
-              { "internalType": "uint256", "name": "tokenId", "type": "uint256" },
-              { "internalType": "address", "name": "heir", "type": "address" }
-            ],
-            "internalType": "struct Erc721Detail[]",
-            "name": "erc721Details",
-            "type": "tuple[]"
-          }
-        ],
-        "internalType": "struct WillDetails",
-        "name": "",
-        "type": "tuple"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  }
-]
-'''
-# indexer/apps/afterme/abis.py
-```
-
-### `apps/afterme/entities.py`
-```py
-# indexer/apps/afterme/entities.py
-from datetime import datetime, timezone
-
-class Will:
-    def __init__(self, address, owner, interval, last_update_timestamp, executed, has_diary, status):
-        self.address = address
-        self.owner = owner
-        self.interval = interval
-        self.last_update = datetime.fromtimestamp(last_update_timestamp, tz=timezone.utc)
-        self.executed = executed
-        self.hasDiary = has_diary
-        self.status = status # 'Empty', 'Active', 'Executed'
-        self.created_at = datetime.now(timezone.utc)
-
-    def to_firestore(self):
-        """Serializes the object to a dictionary for Firestore."""
-        return {
-            'address': self.address,
-            'owner': self.owner,
-            'interval': self.interval, # in seconds
-            'lastUpdate': self.last_update, # as a datetime object
-            'executed': self.executed,
-            'hasDiary': self.hasDiary,
-            'status': self.status,
-            'createdAt': self.created_at,
-            'lastIndexed': datetime.now(timezone.utc)
-        }
-# indexer/apps/afterme/entities.py
-```
-
-### `apps/afterme/paper.py`
-```py
-# indexer/apps/afterme/paper.py
-
-import re
-from web3 import Web3
-from apps.afterme.abis import source_abi, will_abi
-from apps.afterme.entities import Will
-from datetime import datetime, timezone
-import traceback
-
-class Paper:
-    def __init__(self, address, kind, web3, db, wills_collection_name):
-        self.address = address
-        self.kind = kind
-        self.web3: Web3 = web3
-        self.db = db
-        self.wills_collection = db.collection(wills_collection_name)
-        self.abi_string = None
-        self.contract = None
-
-        if kind == "afterme_source":
-            self.abi_string = source_abi
-        elif kind == "afterme_will":
-            self.abi_string = will_abi
-        
-        if self.abi_string:
-            self.abi = re.sub(r'\n+', ' ', self.abi_string).strip()
-        else:
-            self.abi = None
-
-    def get_contract(self):
-        if self.contract is None and self.address and self.abi:
-            try:
-                self.contract = self.web3.eth.contract(
-                    address=Web3.to_checksum_address(self.address), abi=self.abi)
-            except Exception as e:
-                print(f"Error creating AfterMe contract object for {self.address} with kind {self.kind}: {e}")
-                return None
-        return self.contract
-
-    def get_specific_contract(self, address, abi):
-        """Helper to get a contract instance with a specific address and ABI."""
-        try:
-            final_abi = abi
-            if isinstance(abi, str):
-                final_abi = re.sub(r'\n+', ' ', abi).strip()
-            return self.web3.eth.contract(address=Web3.to_checksum_address(address), abi=final_abi)
-        except Exception as e:
-            print(f"Error creating specific AfterMe contract {address}: {e}")
-            return None
-
-    def get_onchain_will_data(self, will_address):
-        """Fetches will details from the chain and formats it for Firestore."""
-        will_contract = self.get_specific_contract(will_address, will_abi)
-        if not will_contract:
-            print(f"Could not instantiate Will contract at {will_address}")
-            return None
-
-        details = will_contract.functions.getWillDetails().call()
-        (owner, interval, last_update, executed, has_diary, _eth_balance, 
-         _heirs, _dist_percentages, _erc20s, _nfts) = details
-        
-        status = 'Active'
-        if executed:
-            status = 'Executed'
-        elif interval == 0:
-            status = 'Empty'
-
-        will_entity = Will(
-            address=will_address,
-            owner=Web3.to_checksum_address(owner),
-            interval=interval,
-            last_update_timestamp=last_update,
-            executed=executed,
-            has_diary=has_diary,
-            status=status
-        )
-        return will_entity.to_firestore()
-
-    def handle_will_created(self, log):
-        """Handles the WillCreated event from the source contract."""
-        contract_instance = self.get_contract()
-        if not contract_instance: return None
-
-        try:
-            decoded_event = contract_instance.events.WillCreated().process_log(log)
-            will_address = Web3.to_checksum_address(decoded_event['args']['willAddress'])
-            print(f"New Will created: {will_address}")
-
-            will_data = self.get_onchain_will_data(will_address)
-            if not will_data: return None
-
-            self.wills_collection.document(will_address).set(will_data)
-            print(f"Successfully stored new Will {will_address} in Firestore with status '{will_data.get('status')}'.")
-            
-            return will_address
-
-        except Exception as e:
-            print(f"Error processing WillCreated event: {e}")
-            traceback.print_exc()
-        return None
-
-    def handle_will_configured(self, log):
-        will_address = Web3.to_checksum_address(log['address'])
-        print(f"Configuration received for Will: {will_address}")
-        try:
-            will_data = self.get_onchain_will_data(will_address)
-            if not will_data: return
-            self.wills_collection.document(will_address).update(will_data)
-            print(f"Successfully updated and set Will {will_address} to 'Active'.")
-        except Exception as e:
-            print(f"Error handling WillConfigured for {will_address}: {e}")
-
-    def handle_will_emptied(self, log):
-        will_address = Web3.to_checksum_address(log['address'])
-        print(f"Emptied event received for Will: {will_address}")
-        try:
-            will_data = self.get_onchain_will_data(will_address)
-            if not will_data: return
-            self.wills_collection.document(will_address).update(will_data)
-            print(f"Successfully updated and set Will {will_address} to 'Empty'.")
-        except Exception as e:
-            print(f"Error handling WillEmptied for {will_address}: {e}")
-
-    def handle_ping(self, log):
-        will_address = Web3.to_checksum_address(log['address'])
-        print(f"Ping received for Will: {will_address}")
-        try:
-            contract_instance = self.get_contract()
-            if not contract_instance: return
-            decoded_event = contract_instance.events.Ping().process_log(log)
-            new_last_update_ts = decoded_event['args']['newLastUpdate']
-            update_data = {
-                'lastUpdate': datetime.fromtimestamp(new_last_update_ts, tz=timezone.utc),
-                'lastIndexed': datetime.now(timezone.utc)
-            }
-            self.wills_collection.document(will_address).update(update_data)
-            print(f"Successfully updated lastUpdate for Will {will_address}.")
-        except Exception as e:
-            print(f"Error handling Ping for Will {will_address}: {e}")
-
-    def handle_executed(self, log):
-        will_address = Web3.to_checksum_address(log['address'])
-        tx_hash = log['transactionHash'].hex()
-        print(f"Execution reported for Will: {will_address} in Tx: {tx_hash}")
-        try:
-            update_data = {
-                'executed': True,
-                'status': 'Executed',
-                'executionTime': datetime.now(timezone.utc),
-                'transactionHash': tx_hash,
-                'lastIndexed': datetime.now(timezone.utc)
-            }
-            self.wills_collection.document(will_address).update(update_data)
-            print(f"Marked Will {will_address} as executed with status 'Executed'.")
-        except Exception as e:
-            print(f"Error marking Will {will_address} as executed: {e}")
-
-    def handle_cancelled(self, log):
-        """Handles the Cancelled event from a Will contract, deleting it and signaling removal."""
-        will_address = Web3.to_checksum_address(log['address'])
-        print(f"Cancellation reported for Will: {will_address}")
-        try:
-            self.wills_collection.document(will_address).delete()
-            print(f"Successfully deleted Will {will_address} from Firestore.")
-            return "DELETED"  # Signal to the main loop to remove this from listeners
-        except Exception as e:
-            print(f"Error deleting Will {will_address}: {e}")
-        return None
-            
-    def handle_event(self, log, func=None):
-        if self.kind == "afterme_source":
-            if func == "WillCreated":
-                return self.handle_will_created(log)
-        elif self.kind == "afterme_will":
-            if func == "Ping":
-                self.handle_ping(log)
-            elif func == "Executed":
-                self.handle_executed(log)
-            elif func == "Cancelled":
-                return self.handle_cancelled(log)
-            elif func == "WillConfigured":
-                self.handle_will_configured(log)
-            elif func == "WillEmptied":
-                self.handle_will_emptied(log)
-        return None
-# indexer/apps/afterme/paper.py
-```
-
-### `apps/afterme/paper.py.errors.txt`
-```txt
-Problems found in: paper.py
-==================================================
-
-ERROR at Line 59:24 (Pylance)
-   Message: Expected expression
-
-ERROR at Line 58:9 (Pylance)
-   Message: "(" was not closed
-
-WARNING at Line 63:44 (Pylance)
-   Message: "owner" is not defined
-
-WARNING at Line 64:22 (Pylance)
-   Message: "interval" is not defined
-
-WARNING at Line 65:35 (Pylance)
-   Message: "last_update" is not defined
-
-WARNING at Line 66:22 (Pylance)
-   Message: "executed" is not defined
-
-WARNING at Line 67:23 (Pylance)
-   Message: "has_diary" is not defined
-
-WARNING at Line 57:9 (Pylance)
-   Message: "details" is not accessed
-
-
 ```
 
 ### `apps/homebase/abis.py`
@@ -5172,40 +4787,6 @@ class Vote:
             'option': self.option,
             'hash': self.hash
         }
-
-```
-
-### `apps/homebase/eventSignatures.py`
-```py
-quorum_function_abi = {
-    "name": "quorum",
-    "inputs": [
-        {"name": "newQuorumNumerator", "type": "uint256"},
-    ],
-}
-
-
-voting_period_function_abi = {
-    "name": "setVotingPeriod",
-    "inputs": [
-        {"name": "newVotingPeriod", "type": "uint32"},
-    ],
-}
-
-proposal_threshold_function_abi = {
-    "name": "setProposalThreshold",
-    "inputs": [
-        {"name": "newProposalThreshold", "type": "uint256"},
-    ],
-}
-voting_delay_function_abi = {
-    "name": "setVotingDelay",
-    "inputs": [
-        {"name": "newVotingDelay", "type": "uint48"},
-    ],
-}
-
-
 
 ```
 
