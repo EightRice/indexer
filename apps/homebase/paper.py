@@ -55,23 +55,19 @@ class Paper:
                 return None
         return self.contract
 
-    # --- FIX #1: Made this helper function robust to handle both string and dict/list ABIs ---
-    # This prevents the app from crashing when an ABI is passed as a Python dictionary.
     def get_specific_contract(self, address, abi):
         """Helper to get a contract instance with a specific address and ABI."""
         try:
             final_abi = abi
-            if isinstance(abi, str):  # Only clean the ABI if it's a string
+            if isinstance(abi, str):
                 final_abi = re.sub(r'\n+', ' ', abi).strip()
             
-            # Web3.py can handle string, dictionary, or list of dictionary ABIs
             return self.web3.eth.contract(
                 address=Web3.to_checksum_address(address), abi=final_abi
             )
         except Exception as e:
             print(f"Error creating specific contract {address}: {e}")
             return None
-    # --- END OF FIX #1 ---
 
     def add_dao(self, log):
         contract_instance = self.get_contract()
@@ -130,8 +126,9 @@ class Paper:
         
         if len(amounts) >= len(members) + 4:
             settings_start_index = len(amounts) - 4
-            org.votingDelay = amounts[settings_start_index]
-            org.votingDuration = amounts[settings_start_index + 1]
+            # Contract provides values in seconds, convert to minutes for DB
+            org.votingDelay = amounts[settings_start_index] // 60
+            org.votingDuration = amounts[settings_start_index + 1] // 60
             org.proposalThreshold = str(amounts[settings_start_index + 2])
             org.quorum = amounts[settings_start_index + 3]
         else:
@@ -177,22 +174,17 @@ class Paper:
         
         org.holders = 0 
 
-        # --- FIX #2: Use the correct ABI for the wrapped token contract ---
-        # This allows the .underlying() function call to succeed.
         wrapped_token_contract = self.get_specific_contract(org.govTokenAddress, wrapper_token_abi)
-        # --- END OF FIX #2 ---
 
         if wrapped_token_contract:
             try:
                 org.decimals = wrapped_token_contract.functions.decimals().call()
                 org.totalSupply = str(wrapped_token_contract.functions.totalSupply().call())
-                # This call will now succeed because we are using the correct ABI
                 org.underlyingToken = str(wrapped_token_contract.functions.underlying().call()) 
             except Exception as e:
                 print(f"Error fetching info for wrapped token {org.govTokenAddress}: {e}")
                 org.decimals = 18
                 org.totalSupply = "0"
-                # org.underlyingToken will remain None, which is handled in toJson()
         else:
             org.decimals = 18
             org.totalSupply = "0"
@@ -205,11 +197,11 @@ class Paper:
                 raw_threshold = dao_contract.functions.proposalThreshold().call()
                 org.proposalThreshold = str(raw_threshold)
                 
-                org.votingDelay = dao_contract.functions.votingDelay().call()
-                org.votingDuration = dao_contract.functions.votingPeriod().call()
+                # Contract provides values in seconds, convert to minutes for DB
+                org.votingDelay = dao_contract.functions.votingDelay().call() // 60
+                org.votingDuration = dao_contract.functions.votingPeriod().call() // 60
 
                 timelock_address = dao_contract.functions.timelock().call()
-                # This call now works because get_specific_contract was fixed to handle dict ABIs
                 timelock_contract = self.get_specific_contract(timelock_address, [timelock_min_delay_abi])
                 if timelock_contract:
                     org.executionDelay = timelock_contract.functions.getMinDelay().call()
@@ -522,11 +514,15 @@ class Paper:
         return int.from_bytes(byte_array, byteorder='big')
 
     def decode_params(self, data_bytes_hex):
-        if not isinstance(data_bytes_hex, str) or not data_bytes_hex.startswith("0x"):
-            print(f"decode_params expects a hex string starting with 0x, got {data_bytes_hex}")
+        if not isinstance(data_bytes_hex, str):
+            print(f"decode_params expects a hex string, got {data_bytes_hex}")
             return None, None
+        
+        if data_bytes_hex.startswith("0x"):
+            data_bytes_hex = data_bytes_hex[2:]
+
         try:
-            data_bytes = bytes.fromhex(data_bytes_hex[2:])
+            data_bytes = bytes.fromhex(data_bytes_hex)
         except ValueError as e:
             print(f"Error converting hex to bytes in decode_params: {data_bytes_hex}, error: {e}")
             return None, None
@@ -605,14 +601,17 @@ class Paper:
 
         try:
             if "voting period" in proposal_type and proposal_calldatas:
-                decoded = decode_function_parameters(voting_period_function_abi, proposal_calldatas[0])
+                calldata_bytes = bytes.fromhex(proposal_calldatas[0])
+                decoded = decode_function_parameters(voting_period_function_abi, calldata_bytes)
                 if decoded and len(decoded) > 0:
                     new_voting_period_seconds = int(decoded[0])
-                    dao_updates["votingDuration"] = new_voting_period_seconds 
-                    print(f"DAO {self.dao} voting period updated to {new_voting_period_seconds}")
+                    # Convert seconds to minutes
+                    dao_updates["votingDuration"] = new_voting_period_seconds // 60
+                    print(f"DAO {self.dao} voting period updated to {dao_updates['votingDuration']} minutes")
 
             if "threshold" in proposal_type and proposal_calldatas:
-                decoded = decode_function_parameters(proposal_threshold_function_abi, proposal_calldatas[0])
+                calldata_bytes = bytes.fromhex(proposal_calldatas[0])
+                decoded = decode_function_parameters(proposal_threshold_function_abi, calldata_bytes)
                 if decoded and len(decoded) > 0:
                     new_raw_threshold = int(decoded[0])
                     dao_snapshot = dao_doc_ref.get()
@@ -627,18 +626,21 @@ class Paper:
                         dao_updates["proposalThreshold"] = str(new_raw_threshold)
 
             if "delay" in proposal_type and proposal_calldatas:
-                decoded = decode_function_parameters(voting_delay_function_abi, proposal_calldatas[0])
+                calldata_bytes = bytes.fromhex(proposal_calldatas[0])
+                decoded = decode_function_parameters(voting_delay_function_abi, calldata_bytes)
                 if decoded and len(decoded) > 0:
-                    new_voting_delay_value = int(decoded[0])
-                    dao_updates["votingDelay"] = new_voting_delay_value
-                    print(f"DAO {self.dao} voting delay updated to {new_voting_delay_value}")
+                    new_voting_delay_seconds = int(decoded[0])
+                    # Convert seconds to minutes
+                    dao_updates["votingDelay"] = new_voting_delay_seconds // 60
+                    print(f"DAO {self.dao} voting delay updated to {dao_updates['votingDelay']} minutes")
             
             if "timelock delay" in proposal_type and proposal_calldatas:
                 pass
 
 
             if "quorum" in proposal_type and proposal_calldatas:
-                decoded = decode_function_parameters(quorum_function_abi, proposal_calldatas[0])
+                calldata_bytes = bytes.fromhex(proposal_calldatas[0])
+                decoded = decode_function_parameters(quorum_function_abi, calldata_bytes)
                 if decoded and len(decoded) > 0:
                     dao_updates["quorum"] = int(decoded[0])
                     print(f"DAO {self.dao} quorum updated to {int(decoded[0])}")
@@ -660,7 +662,8 @@ class Paper:
 
                 if target_token_contract:
                     try:
-                        params = decode_function_parameters(function_abi=mint_function_abi, data_bytes=proposal_calldatas[0])
+                        calldata_bytes = bytes.fromhex(proposal_calldatas[0])
+                        params = decode_function_parameters(function_abi=mint_function_abi, data_bytes=calldata_bytes)
                         if params and len(params) > 0:
                             member_address_affected = Web3.to_checksum_address(params[0])
                             
@@ -715,3 +718,4 @@ class Paper:
             elif func == "ProposalExecuted":
                 self.execute(log)
         return None
+# apps/homebase/paper.py
