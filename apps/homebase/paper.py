@@ -10,8 +10,6 @@ import codecs
 from apps.generic.converting import decode_function_parameters
 from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi, mint_function_abi, burn_function_abi
 
-
-
 class Paper:
     ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
     def __init__(self, address, kind, web3, daos_collection, db, dao=None, token=None):
