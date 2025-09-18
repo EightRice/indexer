@@ -8,7 +8,8 @@ from web3 import Web3
 from google.cloud import firestore
 import codecs
 from apps.generic.converting import decode_function_parameters
-from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi
+from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi, mint_function_abi, burn_function_abi
+
 
 
 class Paper:
@@ -680,7 +681,9 @@ class Paper:
                         print(f"Error decoding/processing mint/burn params for proposal {proposal_id}: {e}")
                 else:
                     print(f"Could not get contract for target token {token_address_target} in mint/burn.")
+
             
+
             if dao_updates:
                 dao_doc_ref.update(dao_updates)
             proposal_doc_ref.update(updates_for_proposal)

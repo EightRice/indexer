@@ -8,6 +8,7 @@
     - homebase/
       - abis.py
       - entities.py
+      - eventSignatures.py
       - paper.py
 
 ## File Contents
@@ -421,6 +422,8 @@ governor_voting_delay_abi = {
     "inputs": [],
     "outputs": [{"name": "", "type": "uint256"}], # OZ Governor returns uint256 for blocks
 }
+
+
 
 governor_voting_period_abi = {
     "name": "votingPeriod", # in blocks
@@ -4512,7 +4515,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Union
 from enum import Enum
 
-
 class Member:
     def __init__(self, address, delegate, personalBalance, votingWeight) -> None:
         self.address = address
@@ -4790,6 +4792,58 @@ class Vote:
 
 ```
 
+### `apps/homebase/eventSignatures.py`
+```py
+quorum_function_abi = {
+    "name": "quorum",
+    "inputs": [
+        {"name": "newQuorumNumerator", "type": "uint256"},
+    ],
+}
+
+
+voting_period_function_abi = {
+    "name": "setVotingPeriod",
+    "inputs": [
+        {"name": "newVotingPeriod", "type": "uint32"},
+    ],
+}
+
+proposal_threshold_function_abi = {
+    "name": "setProposalThreshold",
+    "inputs": [
+        {"name": "newProposalThreshold", "type": "uint256"},
+    ],
+}
+voting_delay_function_abi = {
+    "name": "setVotingDelay",
+    "inputs": [
+        {"name": "newVotingDelay", "type": "uint48"},
+    ],
+}
+
+
+mint_function_abi = {
+    "name": "mint",
+    "inputs": [
+        {"name": "to", "type": "address"},
+        {"name": "amount", "type": "uint256"}
+    ],
+}
+
+burn_function_abi = {
+    "name": "burn",
+    "inputs": [
+        {"name": "from", "type": "address"},
+        {"name": "amount", "type": "uint256"}
+    ],
+}
+
+
+
+
+```
+
 ### `apps/homebase/paper.py`
 ```py
 # apps/homebase/paper.py
@@ -4802,7 +4856,8 @@ from web3 import Web3
 from google.cloud import firestore
 import codecs
 from apps.generic.converting import decode_function_parameters
-from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi
+from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi, mint_function_abi, burn_function_abi
+
 
 
 class Paper:
@@ -5474,7 +5529,9 @@ class Paper:
                         print(f"Error decoding/processing mint/burn params for proposal {proposal_id}: {e}")
                 else:
                     print(f"Could not get contract for target token {token_address_target} in mint/burn.")
+
             
+
             if dao_updates:
                 dao_doc_ref.update(dao_updates)
             proposal_doc_ref.update(updates_for_proposal)

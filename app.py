@@ -263,7 +263,6 @@ print("----------------------------------------------------")
 print(f"Listening for {len(event_signatures)} events on {len(listening_to_addresses)} contracts.")
 
 # --- Main Indexing Loop ---
-processed_transactions = set()
 heartbeat = 0
 # --- START OF CHANGE: Stateful Indexing Logic ---
 last_processed_block = 0
@@ -307,8 +306,8 @@ while True:
 
         for log_entry in logs:
             tx_hash = log_entry["transactionHash"].hex()
-            if tx_hash in processed_transactions: continue 
-            processed_transactions.add(tx_hash)
+            # The processed_transactions check was removed from here as it was causing events within the same tx to be skipped.
+            # The block-by-block processing already prevents reprocessing old transactions.
             contract_address = Web3.to_checksum_address(log_entry["address"])
             if not log_entry["topics"]: continue
             event_signature_from_log = log_entry["topics"][0].hex()

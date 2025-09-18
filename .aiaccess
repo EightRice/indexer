@@ -1,5 +1,4 @@
 # homebase indexer-debug.aiaccess
 !app.py
-!apps/homebase/paper.py
-!apps/homebase/abis.py
-!apps/homebase/entities.py
+!apps/homebase
+apps/homebase/__pycache__

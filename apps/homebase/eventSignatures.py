@@ -27,3 +27,21 @@ voting_delay_function_abi = {
 }
 
 
+mint_function_abi = {
+    "name": "mint",
+    "inputs": [
+        {"name": "to", "type": "address"},
+        {"name": "amount", "type": "uint256"}
+    ],
+}
+
+burn_function_abi = {
+    "name": "burn",
+    "inputs": [
+        {"name": "from", "type": "address"},
+        {"name": "amount", "type": "uint256"}
+    ],
+}
+
+
+

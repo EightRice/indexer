@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Union
 from enum import Enum
 
-
 class Member:
     def __init__(self, address, delegate, personalBalance, votingWeight) -> None:
         self.address = address
