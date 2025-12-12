@@ -1,0 +1,6 @@
+Host etherlink-ec2
+    HostName ec2-13-48-23-15.eu-north-1.compute.amazonaws.com
+    User ubuntu
+    IdentityFile C:/code/indexers2key.pem
+    StrictHostKeyChecking no
+    ServerAliveInterval 60
