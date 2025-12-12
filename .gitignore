@@ -1,0 +1,16 @@
+media/
+__pycache__/
+trustless.json
+trustless.ipynb
+*.ipynb
+homebase.json
+afterme.json
+config.js
+secrets/
+contracts.txt
+imdexer.md
+mediu/
+ethereum_accounts.csv
+homebase.ipynb
+dao.json
+.env

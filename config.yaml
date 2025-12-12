@@ -1,0 +1,10 @@
+# Indexer Configuration
+# Specify which apps should be enabled for indexing
+
+enabled_apps:
+  - homebase
+  # - afterme  # Disabled by default - not live yet
+
+# You can add more apps here as they become available
+# Example:
+# - myapp
