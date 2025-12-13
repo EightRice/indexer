@@ -90,7 +90,7 @@ elif args.network == 'testnet':
     default_rpc = "https://node.ghostnet.etherlink.com"
 elif args.network == 'localhost':
     default_rpc = "http://127.0.0.1:8545"  # Hardhat node
-    # Set Firestore emulator host for localhost
+    # Set Firestore emulator host for localhost (matches Flutter apps' local test mode)
     os.environ["FIRESTORE_EMULATOR_HOST"] = "127.0.0.1:8080"
     print("Using Firestore emulator at 127.0.0.1:8080")
 else:
