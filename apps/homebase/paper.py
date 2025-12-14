@@ -185,8 +185,43 @@ class Paper:
             org.economy = self._pending_economy_addresses[org.address]
             del self._pending_economy_addresses[org.address]
             print(f"Applied pending economy address {org.economy} to DAO {org.address}")
+        else:
+            # Check if document already exists with economy field (SuiteConfigured may have updated it)
+            existing_doc = self.daos_collection.document(org.address).get()
+            if existing_doc.exists:
+                existing_data = existing_doc.to_dict()
+                if existing_data.get('economy'):
+                    org.economy = existing_data['economy']
+                    print(f"Preserved existing economy address {org.economy} for DAO {org.address}")
 
-        self.daos_collection.document(org.address).set(org.toJson())
+        # Debug: print economy value before serialization
+        dao_json = org.toJson()
+        print(f"[DEBUG] org.economy value: {org.economy}, type: {type(org.economy)}")
+        print(f"[DEBUG] dao_json economy: {dao_json.get('economy')}, type: {type(dao_json.get('economy'))}")
+        
+        # Force economy to be a string if it exists
+        if org.economy:
+            dao_json['economy'] = str(org.economy)
+            print(f"[DEBUG] Forced economy to string: {dao_json['economy']}")
+        
+        # Use set with explicit data to ensure economy is written
+        doc_ref = self.daos_collection.document(org.address)
+        
+        # Make a copy to prevent any mutation issues
+        import copy
+        dao_json_copy = copy.deepcopy(dao_json)
+        print(f"[DEBUG] About to call set() with economy: {dao_json_copy.get('economy')}")
+        
+        doc_ref.set(dao_json_copy)
+        
+        print(f"[DEBUG] After set(), dao_json_copy economy: {dao_json_copy.get('economy')}")
+        
+        # Verify what was written
+        verify_doc = doc_ref.get()
+        if verify_doc.exists:
+            verify_data = verify_doc.to_dict()
+            print(f"[DEBUG] Verified economy in Firestore: {verify_data.get('economy')}")
+        
         try:
             batch.commit()
             print(f"Successfully added DAO {org.name} / {org.address} to Firestore.")
@@ -312,7 +347,10 @@ class Paper:
 
         org.registry = {}
 
-        self.daos_collection.document(org.address).set(org.toJson())
+        # Debug: print economy value before serialization
+        dao_json = org.toJson()
+        print(f"[DEBUG] DAO toJson economy field: {dao_json.get('economy')}")
+        self.daos_collection.document(org.address).set(dao_json)
         print(f"Successfully added DAO (wrapped) {org.name} / {org.address} to Firestore.")
         return [org.address, org.govTokenAddress]
 
@@ -378,21 +416,23 @@ class Paper:
 
                 # Create Economy document in Trustless Firestore
                 # Structure: {network_collection}/{economy_address}
-                economy_doc_ref = self.trustless_db.collection(self.trustless_network_collection).document(economy_address)
+                # Use lowercase address for document ID to match Flutter app lookup
+                economy_address_lower = economy_address.lower()
+                economy_doc_ref = self.trustless_db.collection(self.trustless_network_collection).document(economy_address_lower)
 
                 economy_data = {
-                    'address': economy_address,
-                    'daoAddress': dao_address,
-                    'registryAddress': registry_address,
-                    'timelockAddress': timelock_address,
-                    'repTokenAddress': rep_token_address,
-                    'creator': deployer_address,
+                    'address': economy_address_lower,
+                    'daoAddress': dao_address.lower(),
+                    'registryAddress': registry_address.lower(),
+                    'timelockAddress': timelock_address.lower(),
+                    'repTokenAddress': rep_token_address.lower(),
+                    'creator': deployer_address.lower(),
                     'createdAt': created_at,
                     'createdAtBlock': block_number,
                 }
 
                 economy_doc_ref.set(economy_data)
-                print(f"Created Economy document in Trustless Firestore: {economy_address}")
+                print(f"Created Economy document in Trustless Firestore: {economy_address_lower}")
 
             except Exception as e:
                 print(f"Error creating Economy document in Trustless Firestore: {e}")

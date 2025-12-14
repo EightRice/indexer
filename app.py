@@ -391,7 +391,7 @@ else:
 # --- Main Indexing Loop ---
 heartbeat = 0
 # --- START OF CHANGE: Stateful Indexing Logic ---
-last_processed_block = 0
+last_processed_block = -1  # Sentinel for uninitialized state
 BLOCK_HEADROOM = 3  # Query logs 3 blocks behind the head of the chain for safety
 MAX_BLOCK_RANGE = 500 # Process a maximum of 500 blocks at a time to not overload the RPC
 
@@ -406,7 +406,7 @@ while True:
         latest_on_chain = web3.eth.block_number
 
         # Initialize our block tracker on the first run.
-        if last_processed_block == 0:
+        if last_processed_block == -1:
             # Try to use the checkpoint from historical sync if available
             checkpoint_block = None
             if apps_to_run:
@@ -427,13 +427,13 @@ while True:
                 last_processed_block = checkpoint_block
                 print(f"Initializing indexer from historical sync checkpoint. Starting from block {last_processed_block}.")
             else:
-                last_processed_block = latest_on_chain - 15 # Start with the original 15-block window for the first time
+                last_processed_block = max(0, latest_on_chain - 15) # Start with the original 15-block window for the first time
                 print(f"Initializing indexer. Starting from block {last_processed_block}.")
             continue
 
         # Determine the range of blocks to scan in this iteration
         from_block = last_processed_block + 1
-        to_block = latest_on_chain - BLOCK_HEADROOM
+        to_block = max(0, latest_on_chain - BLOCK_HEADROOM)
 
         # If we are already caught up, just wait.
         if from_block > to_block:
