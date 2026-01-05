@@ -35,8 +35,8 @@ except ImportError:
 
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser(description="Unified Indexer for Homebase and AfterMe on Etherlink.")
-parser.add_argument('network', choices=['mainnet', 'testnet', 'localhost'], help="The network to run.")
-parser.add_argument('app', nargs='?', default='all', choices=['homebase', 'afterme', 'all'], help="The app to index.")
+parser.add_argument('network', choices=['mainnet', 'testnet', 'localhost', 'base-sepolia'], help="The network to run.")
+parser.add_argument('app', nargs='?', default='all', choices=['homebase', 'afterme', 'trustless', 'all'], help="The app to index.")
 
 # Redundancy arguments
 parser.add_argument('--mode', choices=['primary', 'secondary', 'standalone'], default='standalone',
@@ -48,11 +48,17 @@ parser.add_argument('--peer-address', type=str,
 parser.add_argument('--instance-id', type=str,
                     help="Unique instance identifier (auto-generated if not provided)")
 
+parser.add_argument('--skip-historical', action='store_true',
+                    help="Skip historical sync and go straight to active listening mode")
+
+parser.add_argument('--no-alerts', action='store_true',
+                    help="Disable Discord alerts (useful for local testing)")
+
 args = parser.parse_args()
 
 def alert(message: str):
     """Helper function to safely send alerts with network/app context."""
-    if CAN_SEND_ALERTS:
+    if CAN_SEND_ALERTS and not args.no_alerts:
         send_indexer_alert(message, network=args.network, app=args.app)
 
 # --- Load Config to Get Enabled Apps ---
@@ -93,6 +99,8 @@ elif args.network == 'localhost':
     # Set Firestore emulator host for localhost (matches Flutter apps' local test mode)
     os.environ["FIRESTORE_EMULATOR_HOST"] = "127.0.0.1:8080"
     print("Using Firestore emulator at 127.0.0.1:8080")
+elif args.network == 'base-sepolia':
+    default_rpc = "https://base-sepolia-rpc.publicnode.com"
 else:
     error_msg = f"Invalid network '{args.network}' specified."
     print(f"FATAL: {error_msg}")
@@ -218,21 +226,43 @@ for app_name in apps_to_run:
         sys.exit(1)
 
 # --- Historical Sync for All Apps ---
-for app_name in apps_to_run:
-    try:
-        print(f"\n=== Running historical sync for app: {app_name} ===")
-        db = app_dbs[app_name]
-        network_config = app_configs[app_name]
-        indexer_module = app_modules[app_name]['indexer']
+# Only run if: checkpoint exists AND --skip-historical is NOT set
+if args.skip_historical:
+    print("\n=== SKIPPING HISTORICAL SYNC (--skip-historical flag) ===")
+else:
+    # Check if checkpoint exists
+    checkpoint_exists = False
+    if apps_to_run:
+        try:
+            first_app = apps_to_run[0]
+            db = app_dbs[first_app]
+            network_config = app_configs[first_app]
+            doc_name = network_config.get('firestore_doc_name')
+            contracts_doc = db.collection("contracts").document(doc_name).get()
+            if contracts_doc.exists:
+                checkpoint = contracts_doc.to_dict().get('lastSyncedBlock', 0)
+                checkpoint_exists = checkpoint is not None and checkpoint > 0
+        except:
+            pass
 
-        # Call app's run_historical_sync() function
-        indexer_module.run_historical_sync(db, web3, network_config, alert)
+    if not checkpoint_exists:
+        print("\n=== SKIPPING HISTORICAL SYNC (no checkpoint found) ===")
+    else:
+        for app_name in apps_to_run:
+            try:
+                print(f"\n=== Running historical sync for app: {app_name} ===")
+                db = app_dbs[app_name]
+                network_config = app_configs[app_name]
+                indexer_module = app_modules[app_name]['indexer']
 
-    except Exception as e:
-        error_msg = f"Error during {app_name} historical sync: {e}"
-        print(f"ERROR: {error_msg}")
-        traceback.print_exc()
-        alert(error_msg)
+                # Call app's run_historical_sync() function
+                indexer_module.run_historical_sync(db, web3, network_config, alert)
+
+            except Exception as e:
+                error_msg = f"Error during {app_name} historical sync: {e}"
+                print(f"ERROR: {error_msg}")
+                traceback.print_exc()
+                alert(error_msg)
 
 # --- Setup Paper Objects for All Apps ---
 for app_name in apps_to_run:
@@ -257,7 +287,8 @@ for app_name in apps_to_run:
             'addresses': app_addresses,
             'papers': app_papers,
             'daos_collection': papers_result.get('daos_collection'),  # For homebase
-            'wills_collection_name': network_config.get('wills_collection_name')  # For afterme
+            'wills_collection_name': network_config.get('wills_collection_name'),  # For afterme
+            'network_collection': papers_result.get('network_collection'),  # For trustless
         })
 
         print(f"Added {len(app_addresses)} addresses and {len(app_papers)} papers from {app_name}")
@@ -306,8 +337,8 @@ if redundancy_enabled:
             network_config = app_configs[first_app]
             doc_name = network_config.get('firestore_doc_name')
 
-            # Check networks collection for lastSyncedBlock
-            network_doc = db.collection("networks").document(doc_name).get()
+            # Check contracts collection for lastSyncedBlock
+            network_doc = db.collection("contracts").document(doc_name).get()
             if network_doc.exists:
                 firestore_last_block = network_doc.to_dict().get('lastSyncedBlock', 0)
 
@@ -407,28 +438,32 @@ while True:
 
         # Initialize our block tracker on the first run.
         if last_processed_block == -1:
-            # Try to use the checkpoint from historical sync if available
-            checkpoint_block = None
-            if apps_to_run:
-                try:
-                    # Use the first app's checkpoint
-                    first_app = apps_to_run[0]
-                    db = app_dbs[first_app]
-                    network_config = app_configs[first_app]
-                    doc_name = network_config.get('firestore_doc_name')
-                    network_doc = db.collection("networks").document(doc_name).get()
-                    if network_doc.exists:
-                        checkpoint_block = network_doc.to_dict().get('lastSyncedBlock', None)
-                except:
-                    pass
-
-            # Use checkpoint if available, otherwise start from latest - 15
-            if checkpoint_block is not None and checkpoint_block > 0:
-                last_processed_block = checkpoint_block
-                print(f"Initializing indexer from historical sync checkpoint. Starting from block {last_processed_block}.")
+            if args.skip_historical:
+                # Skip historical = start from current block (minus small buffer)
+                last_processed_block = max(0, latest_on_chain - 15)
+                print(f"Skipping historical sync. Starting from block {last_processed_block}.")
             else:
-                last_processed_block = max(0, latest_on_chain - 15) # Start with the original 15-block window for the first time
-                print(f"Initializing indexer. Starting from block {last_processed_block}.")
+                # Try to use the checkpoint from contracts collection
+                checkpoint_block = None
+                if apps_to_run:
+                    try:
+                        first_app = apps_to_run[0]
+                        db = app_dbs[first_app]
+                        network_config = app_configs[first_app]
+                        doc_name = network_config.get('firestore_doc_name')
+                        network_doc = db.collection("contracts").document(doc_name).get()
+                        if network_doc.exists:
+                            checkpoint_block = network_doc.to_dict().get('lastSyncedBlock', None)
+                    except:
+                        pass
+
+                # Use checkpoint if available, otherwise start from latest - 15
+                if checkpoint_block is not None and checkpoint_block > 0:
+                    last_processed_block = checkpoint_block
+                    print(f"Resuming from checkpoint. Starting from block {last_processed_block}.")
+                else:
+                    last_processed_block = max(0, latest_on_chain - 15)
+                    print(f"No checkpoint found. Starting from block {last_processed_block}.")
             continue
 
         # Determine the range of blocks to scan in this iteration
@@ -445,8 +480,26 @@ while True:
             to_block = from_block + MAX_BLOCK_RANGE - 1
             print(f"[{args.network.upper()}] Large gap detected. Processing chunk: {from_block} -> {to_block}")
 
-        logs = web3.eth.get_logs({"fromBlock": from_block, "toBlock": to_block, "address": listening_to_addresses})
-        
+        # Some RPCs (like Base Sepolia public nodes) limit the number of addresses per query
+        # Batch addresses if we have more than MAX_ADDRESSES_PER_QUERY
+        MAX_ADDRESSES_PER_QUERY = 5
+        logs = []
+
+        if len(listening_to_addresses) <= MAX_ADDRESSES_PER_QUERY:
+            logs = web3.eth.get_logs({"fromBlock": from_block, "toBlock": to_block, "address": listening_to_addresses})
+        else:
+            # Batch the addresses into smaller chunks
+            num_batches = (len(listening_to_addresses) + MAX_ADDRESSES_PER_QUERY - 1) // MAX_ADDRESSES_PER_QUERY
+            for i in range(0, len(listening_to_addresses), MAX_ADDRESSES_PER_QUERY):
+                batch_addresses = listening_to_addresses[i:i + MAX_ADDRESSES_PER_QUERY]
+                batch_logs = web3.eth.get_logs({"fromBlock": from_block, "toBlock": to_block, "address": batch_addresses})
+                logs.extend(batch_logs)
+                # Small delay between batches to avoid rate limiting (50ms per batch)
+                if num_batches > 10 and i + MAX_ADDRESSES_PER_QUERY < len(listening_to_addresses):
+                    time.sleep(0.05)
+            # Sort logs by block number, transaction index, log index to maintain order
+            logs.sort(key=lambda x: (x['blockNumber'], x['transactionIndex'], x['logIndex']))
+
         if logs:
             print(f"[{args.network.upper()}] Found {len(logs)} logs between blocks {from_block} and {to_block}")
 
@@ -477,7 +530,7 @@ while True:
                 if contract_address in listening_to_addresses: listening_to_addresses.remove(contract_address)
                 if contract_address in papers: del papers[contract_address]
                 print(f"Now listening to {len(listening_to_addresses)} addresses.")
-            elif isinstance(new_contract_info, list) and len(new_contract_info) == 2:
+            elif isinstance(new_contract_info, list) and len(new_contract_info) == 2 and all(isinstance(x, str) for x in new_contract_info):
                 # Homebase: New DAO created (returns [dao_address, token_address])
                 if 'homebase' in apps_to_run:
                     dao_address_new, token_address_new = new_contract_info
@@ -501,9 +554,83 @@ while True:
                     if dao_address_new not in papers:
                         papers.update({dao_address_new: HomebasePaper(token=p_new_token, address=dao_address_new, kind="dao", daos_collection=daos_collection, db=homebase_db, dao=dao_address_new, web3=web3)})
                     print(f"Now listening to {len(listening_to_addresses)} addresses.")
+            elif isinstance(new_contract_info, list) and all(isinstance(item, tuple) for item in new_contract_info):
+                # Homebase: SuiteConfigured returns list of tuples: [('economy', addr), ('registry', addr, dao_addr)]
+                for item in new_contract_info:
+                    if item[0] == 'economy' and 'trustless' in apps_to_run:
+                        economy_address_new = Web3.to_checksum_address(item[1])
+                        print(f"Adding new Trustless Economy {economy_address_new} to listener.")
+                        if economy_address_new not in listening_to_addresses: listening_to_addresses.append(economy_address_new)
+
+                        if economy_address_new not in papers:
+                            trustless_db = app_dbs['trustless']
+                            trustless_data = app_data['trustless']
+                            network_collection = trustless_data.get('network_collection')
+                            from apps.trustless.paper import Paper as TrustlessPaper
+                            papers.update({economy_address_new: TrustlessPaper(
+                                address=economy_address_new,
+                                kind="economy",
+                                web3=web3,
+                                db=trustless_db,
+                                network_collection=network_collection,
+                            )})
+                        print(f"Now listening to {len(listening_to_addresses)} addresses.")
+                    elif item[0] == 'registry' and 'homebase' in apps_to_run:
+                        # Registry for Economy DAO description updates
+                        registry_address_new = Web3.to_checksum_address(item[1])
+                        dao_address_for_registry = Web3.to_checksum_address(item[2])
+                        print(f"Adding new Registry {registry_address_new} (DAO: {dao_address_for_registry[:10]}...) to listener.")
+                        if registry_address_new not in listening_to_addresses: listening_to_addresses.append(registry_address_new)
+
+                        if registry_address_new not in papers:
+                            homebase_db = app_dbs['homebase']
+                            homebase_data = app_data['homebase']
+                            daos_collection = homebase_data.get('daos_collection')
+                            from apps.homebase.paper import Paper as HomebasePaper
+                            papers.update({registry_address_new: HomebasePaper(
+                                address=registry_address_new,
+                                kind="registry",
+                                daos_collection=daos_collection,
+                                db=homebase_db,
+                                dao=dao_address_for_registry,
+                                web3=web3,
+                            )})
+                        print(f"Now listening to {len(listening_to_addresses)} addresses.")
             elif isinstance(new_contract_info, str) and new_contract_info.startswith("0x"):
+                # Handle single address return from AfterMe or Trustless
+                # Determine which app based on the emitting paper's kind
+
+                emitting_paper = papers.get(contract_address)
+                emitting_kind = getattr(emitting_paper, 'kind', None) if emitting_paper else None
+
+                # Trustless: New project created (economy emits NewProject)
+                if 'trustless' in apps_to_run and emitting_kind == 'economy':
+                    new_project_address = Web3.to_checksum_address(new_contract_info)
+                    # contract_address IS the economy that emitted the NewProject event
+                    economy_address = contract_address
+                    print(f"Adding new Trustless Project {new_project_address} (economy: {economy_address[:10]}...) to listener.")
+                    if new_project_address not in listening_to_addresses: listening_to_addresses.append(new_project_address)
+                    if new_project_address not in papers:
+                        # Get trustless-specific data
+                        trustless_db = app_dbs['trustless']
+                        trustless_data = app_data['trustless']
+                        network_collection = trustless_data.get('network_collection')
+
+                        # Import trustless Paper class
+                        from apps.trustless.paper import Paper as TrustlessPaper
+
+                        papers.update({new_project_address: TrustlessPaper(
+                            address=new_project_address,
+                            kind="project",
+                            web3=web3,
+                            db=trustless_db,
+                            network_collection=network_collection,
+                            economy_address=economy_address,
+                        )})
+                    print(f"Now listening to {len(listening_to_addresses)} addresses.")
+
                 # AfterMe: New will created (returns will address)
-                if 'afterme' in apps_to_run:
+                elif 'afterme' in apps_to_run:
                     new_will_address = new_contract_info
                     print(f"Adding new AfterMe Will {new_will_address} to listener.")
                     if new_will_address not in listening_to_addresses: listening_to_addresses.append(new_will_address)
@@ -533,17 +660,17 @@ while True:
         should_update_checkpoint = logs or (heartbeat % 50 == 0)
 
         if apps_to_run and should_update_checkpoint and should_write_to_firestore:
-            # Update checkpoint for all apps
-            for app_name in apps_to_run:
-                try:
-                    db = app_dbs[app_name]
-                    network_config = app_configs[app_name]
-                    doc_name = network_config.get('firestore_doc_name')
-                    if doc_name:
-                        network_ref = db.collection("networks").document(doc_name)
-                        network_ref.update({'lastSyncedBlock': last_processed_block})
-                except Exception as e:
-                    print(f"Warning: Could not update lastSyncedBlock for {app_name} in Firestore: {e}")
+            # Update checkpoint in contracts collection (only need to do once, not per-app)
+            try:
+                first_app = apps_to_run[0]
+                db = app_dbs[first_app]
+                network_config = app_configs[first_app]
+                doc_name = network_config.get('firestore_doc_name')
+                if doc_name:
+                    contracts_ref = db.collection("contracts").document(doc_name)
+                    contracts_ref.set({'lastSyncedBlock': last_processed_block}, merge=True)
+            except Exception as e:
+                print(f"Warning: Could not update lastSyncedBlock in Firestore: {e}")
 
         # Send heartbeat to peer
         if redundancy_protocol and current_role in ['primary', 'secondary']:
@@ -555,10 +682,24 @@ while True:
     except Web3RPCError as e:
         # This is a more robust way to catch recoverable errors without crashing
         error_message = str(e).lower()
-        is_recoverable_error = any(phrase in error_message for phrase in ["block range", "unavailable", "block limit", "server error"])
+        is_recoverable_error = any(phrase in error_message for phrase in ["block range", "unavailable", "block limit", "server error", "rate limit", "too many requests"])
         if is_recoverable_error:
-            print(f"WARN: Recoverable RPC error encountered: {e}. Waiting 10s before retry.")
-            time.sleep(10) # Wait a bit longer for the node to sort itself out
+            # Parse retry time from rate limit messages like "retry in 10m0s" or "retry in 30s"
+            wait_time = 10  # Default wait time
+            retry_match = re.search(r'retry in (\d+)m?(\d*)s?', str(e))
+            if retry_match:
+                minutes = int(retry_match.group(1)) if retry_match.group(1) else 0
+                seconds = int(retry_match.group(2)) if retry_match.group(2) else 0
+                # If the first capture is minutes (has 'm' after), parse accordingly
+                if 'm' in str(e)[retry_match.start():retry_match.end()]:
+                    wait_time = minutes * 60 + seconds
+                else:
+                    # Just seconds (e.g., "retry in 10s")
+                    wait_time = minutes  # The first number is actually seconds
+                # Cap at 10 minutes max, minimum 10 seconds
+                wait_time = max(10, min(wait_time, 600))
+            print(f"WARN: Recoverable RPC error encountered: {e}. Waiting {wait_time}s before retry.")
+            time.sleep(wait_time)
         else:
             # For other, more severe RPC errors, trigger the full reconnect
             raise e
