@@ -14,7 +14,6 @@ NETWORKS = {
     "mainnet": {
         "firestore_doc_name": "Etherlink",
         "dao_collection_name": "idaosEtherlink",
-        # Trustless economy collection (network name is the collection)
         "trustless_network_collection": "Etherlink",
     },
     "testnet": {
@@ -22,10 +21,20 @@ NETWORKS = {
         "dao_collection_name": "idaosEtherlink-Testnet",
         "trustless_network_collection": "Etherlink-Testnet",
     },
+    "shadownet": {
+        "firestore_doc_name": "Etherlink-Shadownet",
+        "dao_collection_name": "idaosEtherlink-Shadownet",
+        "trustless_network_collection": "Etherlink-Shadownet",
+    },
     "localhost": {
         "firestore_doc_name": "Localhost",
         "dao_collection_name": "idaosLocalhost",
         "trustless_network_collection": "Localhost",
+    },
+    "base-sepolia": {
+        "firestore_doc_name": "Base-Sepolia",
+        "dao_collection_name": "idaosBase-Sepolia",
+        "trustless_network_collection": "Base-Sepolia",
     },
 }
 
@@ -39,4 +48,5 @@ EVENT_SIGNATURES = [
     "ProposalQueued(uint256,uint256)",
     "ProposalExecuted(uint256)",
     "VoteCast(address,uint256,uint8,uint256,string)",
+    "RegistryUpdated(string,string)",  # Registry: key, value - for Economy DAO descriptions
 ]

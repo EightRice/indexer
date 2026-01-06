@@ -35,7 +35,7 @@ except ImportError:
 
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser(description="Unified Indexer for Homebase and AfterMe on Etherlink.")
-parser.add_argument('network', choices=['mainnet', 'testnet', 'localhost', 'base-sepolia'], help="The network to run.")
+parser.add_argument('network', choices=['mainnet', 'testnet', 'shadownet', 'localhost', 'base-sepolia'], help="The network to run.")
 parser.add_argument('app', nargs='?', default='all', choices=['homebase', 'afterme', 'trustless', 'all'], help="The app to index.")
 
 # Redundancy arguments
@@ -94,6 +94,8 @@ if args.network == 'mainnet':
     default_rpc = "https://node.mainnet.etherlink.com"
 elif args.network == 'testnet':
     default_rpc = "https://node.ghostnet.etherlink.com"
+elif args.network == 'shadownet':
+    default_rpc = "https://node.shadownet.etherlink.com"
 elif args.network == 'localhost':
     default_rpc = "http://127.0.0.1:8545"  # Hardhat node
     # Set Firestore emulator host for localhost (matches Flutter apps' local test mode)
