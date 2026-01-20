@@ -14,3 +14,4 @@ ethereum_accounts.csv
 homebase.ipynb
 dao.json
 .env
+.prod

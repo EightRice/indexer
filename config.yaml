@@ -4,6 +4,7 @@
 enabled_apps:
   - homebase
   # - afterme  # Disabled by default - not live yet
+  - trustless
 
 # You can add more apps here as they become available
 # Example:

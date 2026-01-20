@@ -4234,6 +4234,28 @@ wrapper_token_abi = '''
 ]
 '''
 
+
+# Registry contract ABI - for RegistryUpdated events (Economy DAO descriptions)
+registryAbi = '''
+[
+    {
+        "anonymous": false,
+        "inputs": [
+            {"indexed": false, "internalType": "string", "name": "key", "type": "string"},
+            {"indexed": false, "internalType": "string", "name": "value", "type": "string"}
+        ],
+        "name": "RegistryUpdated",
+        "type": "event"
+    },
+    {
+        "inputs": [{"internalType": "string", "name": "key", "type": "string"}],
+        "name": "getRegistryValue",
+        "outputs": [{"internalType": "string", "name": "", "type": "string"}],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]'''
+
 # TrustlessFactory ABI - includes NewDaoCreated and SuiteConfigured events
 trustless_wrapper_abi = '''
 [

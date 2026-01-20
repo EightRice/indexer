@@ -1,6 +1,6 @@
 # apps/homebase/paper.py
 
-from apps.homebase.abis import wrapperAbi, daoAbiGlobal, tokenAbiGlobal, wrapper_token_abi, timelock_min_delay_abi, wrapper_w_abi, trustless_wrapper_abi
+from apps.homebase.abis import wrapperAbi, daoAbiGlobal, tokenAbiGlobal, wrapper_token_abi, timelock_min_delay_abi, wrapper_w_abi, trustless_wrapper_abi, registryAbi
 from datetime import datetime, timezone, timedelta
 from apps.homebase.entities import ProposalStatus, Proposal, StateInContract, Txaction, Token, Member, Org, Vote
 import re
@@ -39,6 +39,9 @@ class Paper:
         elif kind == "wrapper_trustless":
             # TrustlessFactory emits NewDaoCreated and SuiteConfigured events
             self.abi_string = trustless_wrapper_abi
+        elif kind == "registry":
+            # Registry contract for Economy DAOs - emits RegistryUpdated events
+            self.abi_string = registryAbi
         elif kind == "token":
             self.abi_string = tokenAbiGlobal
         else: # dao
@@ -87,7 +90,8 @@ class Paper:
 
         args = decoded_event['args']
         name = args['name']
-        print(f"New DAO (original wrapper): {name} from event")
+        safe_name = name.encode('ascii', 'replace').decode()
+        print(f"New DAO (original wrapper): {safe_name} from event")
         
         org = Org(name=name)
         org.creationDate = datetime.now(timezone.utc)
@@ -193,6 +197,13 @@ class Paper:
                 if existing_data.get('economy'):
                     org.economy = existing_data['economy']
                     print(f"Preserved existing economy address {org.economy} for DAO {org.address}")
+
+        # Check if there's a pending description from SuiteConfigured event
+        # (For Economy DAOs, description is fetched from Registry during SuiteConfigured)
+        if hasattr(self, '_pending_descriptions') and org.address in self._pending_descriptions:
+            org.description = self._pending_descriptions[org.address]
+            del self._pending_descriptions[org.address]
+            print(f"Applied pending description to DAO {org.address}: {org.description[:50]}...")
 
         # Debug: print economy value before serialization
         dao_json = org.toJson()
@@ -388,20 +399,42 @@ class Paper:
 
         print(f"SuiteConfigured: DAO {dao_address} linked to Economy {economy_address}")
 
+        # Query the registry contract for the description (set during deployment)
+        # This is more reliable than trying to catch the RegistryUpdated event from the same tx
+        description = None
+        try:
+            registry_contract = self.get_specific_contract(registry_address, registryAbi)
+            if registry_contract:
+                description = registry_contract.functions.getRegistryValue("description").call()
+                if description:
+                    print(f"Fetched description from Registry {registry_address}: {description[:50]}...")
+                else:
+                    print(f"No description found in Registry {registry_address}")
+        except Exception as e:
+            print(f"Error fetching description from Registry {registry_address}: {e}")
+
         # Update the DAO document with economy address (Homebase Firestore)
         try:
             dao_doc_ref = self.daos_collection.document(dao_address)
             dao_doc = dao_doc_ref.get()
 
             if dao_doc.exists:
-                dao_doc_ref.update({'economy': economy_address})
+                update_data = {'economy': economy_address}
+                if description:
+                    update_data['description'] = description
+                    update_data['registry.description'] = description
+                dao_doc_ref.update(update_data)
                 print(f"Updated DAO {dao_address} with economy address {economy_address}")
             else:
-                # DAO doesn't exist yet - store pending economy address
+                # DAO doesn't exist yet - store pending economy address and description
                 # This happens when SuiteConfigured arrives before NewDaoCreated
                 if not hasattr(self, '_pending_economy_addresses'):
                     self._pending_economy_addresses = {}
+                if not hasattr(self, '_pending_descriptions'):
+                    self._pending_descriptions = {}
                 self._pending_economy_addresses[dao_address] = economy_address
+                if description:
+                    self._pending_descriptions[dao_address] = description
                 print(f"Stored pending economy address for DAO {dao_address}: {economy_address}")
         except Exception as e:
             print(f"Error updating DAO {dao_address} with economy address: {e}")
@@ -442,7 +475,9 @@ class Paper:
             if not self.trustless_db:
                 print("Trustless DB not configured - skipping cross-write")
 
-        return None
+        # Return economy and registry addresses with marker so main loop can add them to listener
+        # Registry paper is needed to capture RegistryUpdated events for description updates
+        return [('economy', economy_address), ('registry', registry_address, dao_address)]
 
 
     def delegate(self, log):
@@ -902,6 +937,10 @@ class Paper:
                     registry_map[key] = value
                     dao_updates["registry"] = registry_map
                     print(f"DAO {self.dao} registry updated: {key} -> {value}")
+                    # Also update the description field if key is "description"
+                    if key == "description":
+                        dao_updates["description"] = value
+                        print(f"DAO {self.dao} description updated: {value[:50]}...")
 
 
             if "mint" in proposal_type.lower() or "burn" in proposal_type.lower() and proposal_calldatas and proposal_targets_db:
@@ -947,6 +986,60 @@ class Paper:
             print(traceback.format_exc())
 
 
+
+    def registry_updated(self, log):
+        """
+        Handle RegistryUpdated event from Registry contracts.
+        Updates the DAO's description field when key is 'description'.
+        
+        Event: RegistryUpdated(string key, string value)
+        """
+        if not self.dao:
+            print(f"Registry paper at {self.address} has no DAO address set, cannot process RegistryUpdated")
+            return None
+            
+        contract_instance = self.get_contract()
+        if not contract_instance:
+            print(f"Could not get contract instance for registry {self.address}")
+            return None
+
+        try:
+            decoded_event = contract_instance.events.RegistryUpdated().process_log(log)
+        except Exception as e:
+            print(f"Error processing RegistryUpdated log for {self.address}: {e}")
+            return None
+
+        args = decoded_event['args']
+        key = args['key']
+        value = args['value']
+        
+        print(f"RegistryUpdated: key='{key}' for DAO {self.dao}")
+
+        # If key is 'description', update the DAO's description field
+        if key == 'description':
+            try:
+                dao_doc_ref = self.daos_collection.document(self.dao)
+                dao_doc_ref.update({
+                    'description': value,
+                    'registry.description': value  # Also update in registry map
+                })
+                print(f"Updated description for DAO {self.dao}: {value[:50]}...")
+            except Exception as e:
+                print(f"Error updating description for DAO {self.dao}: {e}")
+        else:
+            # For other keys, just update the registry map
+            try:
+                dao_doc_ref = self.daos_collection.document(self.dao)
+                dao_doc_ref.update({
+                    f'registry.{key}': value
+                })
+                print(f"Updated registry key '{key}' for DAO {self.dao}")
+            except Exception as e:
+                print(f"Error updating registry key '{key}' for DAO {self.dao}: {e}")
+        
+        return None
+
+
     def handle_event(self, log, func=None):
         # Debug logging
         print(f"[DEBUG handle_event] kind={self.kind}, func={func}, address={self.address}")
@@ -984,5 +1077,8 @@ class Paper:
                 self.queue(log)
             elif func == "ProposalExecuted":
                 self.execute(log)
+        elif self.kind == "registry":
+            if func == "RegistryUpdated":
+                self.registry_updated(log)
         return None
 # apps/homebase/paper.py
