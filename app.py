@@ -26,11 +26,13 @@ import uuid
 
 # --- Safe Import for Discord Alerter ---
 try:
-    from apps.generic.services import send_indexer_alert
+    from apps.generic.services import send_indexer_alert, record_heartbeat, process_pending_alerts
     CAN_SEND_ALERTS = True
 except ImportError:
     print("WARNING: 'generic/services.py' not found. Discord alerts will be disabled.")
-    def send_indexer_alert(msg, network="N/A", app="N/A"): pass
+    def send_indexer_alert(msg, network="N/A", app="N/A", immediate=False): pass
+    def record_heartbeat(network, app): pass
+    def process_pending_alerts(): return 0
     CAN_SEND_ALERTS = False
 
 # --- Argument Parsing ---
@@ -56,10 +58,10 @@ parser.add_argument('--no-alerts', action='store_true',
 
 args = parser.parse_args()
 
-def alert(message: str):
+def alert(message: str, immediate: bool = False):
     """Helper function to safely send alerts with network/app context."""
     if CAN_SEND_ALERTS and not args.no_alerts:
-        send_indexer_alert(message, network=args.network, app=args.app)
+        send_indexer_alert(message, network=args.network, app=args.app, immediate=immediate)
 
 # --- Load Config to Get Enabled Apps ---
 config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
@@ -71,7 +73,7 @@ try:
 except Exception as e:
     error_msg = f"Could not load config.yaml: {e}"
     print(f"FATAL: {error_msg}")
-    alert(error_msg)
+    alert(error_msg, immediate=True)
     sys.exit(1)
 
 # --- Filter Enabled Apps Based on Command-Line Argument ---
@@ -84,7 +86,7 @@ else:
     else:
         error_msg = f"App '{args.app}' is not enabled in config.yaml. Enabled apps: {enabled_apps}"
         print(f"FATAL: {error_msg}")
-        alert(error_msg)
+        alert(error_msg, immediate=True)
         sys.exit(1)
 
 print(f"--- Indexer starting for Network: {args.network.upper()}, App(s): {', '.join(apps_to_run).upper()} ---")
@@ -106,7 +108,7 @@ elif args.network == 'base-sepolia':
 else:
     error_msg = f"Invalid network '{args.network}' specified."
     print(f"FATAL: {error_msg}")
-    alert(error_msg)
+    alert(error_msg, immediate=True)
     sys.exit(1)
 
 rpc = default_rpc
@@ -136,7 +138,7 @@ for app_name in apps_to_run:
         if args.network not in app_config_module.NETWORKS:
             error_msg = f"Network '{args.network}' not found in {app_name} config"
             print(f"FATAL: {error_msg}")
-            alert(error_msg)
+            alert(error_msg, immediate=True)
             sys.exit(1)
 
         network_config = app_config_module.NETWORKS[args.network]
@@ -159,7 +161,7 @@ for app_name in apps_to_run:
         error_msg = f"Could not load or initialize app '{app_name}': {e}"
         print(f"FATAL: {error_msg}")
         traceback.print_exc()
-        alert(error_msg)
+        alert(error_msg, immediate=True)
         sys.exit(1)
 
 # --- Fetch RPC from Firestore (check all apps, first one with RPC wins) ---
@@ -190,7 +192,7 @@ web3 = Web3(Web3.HTTPProvider(rpc))
 if not web3.is_connected():
     error_msg = f"Node connection to {rpc} failed!"
     print(f"FATAL: {error_msg}")
-    alert(error_msg)
+    alert(error_msg, immediate=True)
     sys.exit(1)
 print(f"Node connected successfully to {rpc}")
 
@@ -264,7 +266,7 @@ else:
                 error_msg = f"Error during {app_name} historical sync: {e}"
                 print(f"ERROR: {error_msg}")
                 traceback.print_exc()
-                alert(error_msg)
+                alert(error_msg, immediate=True)
 
 # --- Setup Paper Objects for All Apps ---
 for app_name in apps_to_run:
@@ -299,7 +301,7 @@ for app_name in apps_to_run:
         error_msg = f"Could not setup papers for app '{app_name}': {e}"
         print(f"FATAL: {error_msg}")
         traceback.print_exc()
-        alert(error_msg)
+        alert(error_msg, immediate=True)
         sys.exit(1)
 
 # --- Finalize Listener Setup ---
@@ -719,6 +721,12 @@ while True:
             
     if heartbeat % 50 == 0:
         print(f"[{args.network.upper()}] Heartbeat: {heartbeat}. Listening to {len(listening_to_addresses)} addresses on app(s): {args.app}. Current Block: {last_processed_block}")
+    # Record successful heartbeat to cancel any pending transient alerts
+    if CAN_SEND_ALERTS and not args.no_alerts:
+        record_heartbeat(args.network, args.app)
+        # Process any pending alerts that have passed their grace period
+        if heartbeat % 10 == 0:
+            process_pending_alerts()
     
     # Adjust sleep time based on whether we are catching up or fully synced
     if (latest_on_chain - last_processed_block) > MAX_BLOCK_RANGE:
