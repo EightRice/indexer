@@ -38,7 +38,7 @@ except ImportError:
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser(description="Unified Indexer for Homebase and AfterMe on Etherlink.")
 parser.add_argument('network', choices=['mainnet', 'testnet', 'shadownet', 'localhost', 'base-sepolia'], help="The network to run.")
-parser.add_argument('app', nargs='?', default='all', choices=['homebase', 'afterme', 'trustless', 'all'], help="The app to index.")
+parser.add_argument('app', nargs='?', default='all', choices=['homebase', 'afterme', 'trustless', 'autonet', 'all'], help="The app to index.")
 
 # Redundancy arguments
 parser.add_argument('--mode', choices=['primary', 'secondary', 'standalone'], default='standalone',

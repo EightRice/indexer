@@ -5,6 +5,7 @@ enabled_apps:
   - homebase
   # - afterme  # Disabled by default - not live yet
   - trustless
+  - autonet  # Substrate.sol agent directory -> autonet-275416 Firestore
 
 # You can add more apps here as they become available
 # Example:
