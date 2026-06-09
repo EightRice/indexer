@@ -15,3 +15,5 @@ homebase.ipynb
 dao.json
 .env
 .prod
+indexer_testnet.log
+indexer*.log
