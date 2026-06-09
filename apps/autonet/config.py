@@ -20,6 +20,11 @@ FIREBASE_CREDENTIALS = "secrets/autonet-firebase.json"
 # here — it's resolved from settings/network at startup (single source of truth
 # shared with the web app). We keep the agents collection + checkpoint doc per
 # network so testnet/shadownet data never mix.
+# Every network the other indexer instances run on must be present, even where
+# autonet isn't deployed — a missing entry is a FATAL exit for the whole
+# process (app.py). On networks with no autonet contract, settings/network has
+# no substrateAddress for that project, so setup_papers finds no address and
+# the app idles harmlessly.
 NETWORKS = {
     "shadownet": {
         "firestore_doc_name": "Etherlink-Shadownet",
@@ -27,6 +32,14 @@ NETWORKS = {
     },
     "mainnet": {
         "firestore_doc_name": "Etherlink",
+        "agents_collection": "agents",
+    },
+    "testnet": {
+        "firestore_doc_name": "Etherlink-Testnet",
+        "agents_collection": "agents",
+    },
+    "base-sepolia": {
+        "firestore_doc_name": "Base-Sepolia",
         "agents_collection": "agents",
     },
     "localhost": {

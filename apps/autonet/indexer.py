@@ -24,17 +24,33 @@ def initialize(db, web3: Web3, network_config: dict):
     return {"event_signatures": event_sigs}
 
 
-def _resolve_substrate_address(db) -> str | None:
+def _resolve_substrate_address(db, web3: Web3) -> str | None:
     """Single source of truth for which contract to follow: settings/network
     (written by autonet's publish_network_config.py after each redeploy). Same
-    doc the web app reads, so the indexer never drifts from what users see."""
+    doc the web app reads, so the indexer never drifts from what users see.
+
+    The autonet Firebase project holds ONE settings/network doc (the deployed
+    chain). This app, however, is loaded on every indexer instance (mainnet,
+    base-sepolia, shadownet, ...). So we gate on chain id: only bind the
+    contract when the running instance's chain matches the doc's chainId.
+    On every other instance autonet idles — no wrong-chain log scans."""
     snap = db.collection(SETTINGS_COLLECTION).document(NETWORK_DOC).get()
     if not snap.exists:
         print("[autonet] settings/network missing — run publish_network_config.py")
         return None
-    addr = (snap.to_dict() or {}).get("substrateAddress", "")
+    data = snap.to_dict() or {}
+    addr = data.get("substrateAddress", "")
     if not addr:
         print("[autonet] settings/network has no substrateAddress")
+        return None
+    doc_chain = int(data.get("chainId", 0) or 0)
+    try:
+        live_chain = web3.eth.chain_id
+    except Exception:
+        live_chain = 0
+    if doc_chain and live_chain and doc_chain != live_chain:
+        print(f"[autonet] deployed on chain {doc_chain}, this instance is "
+              f"{live_chain} — idling on this network.")
         return None
     return Web3.to_checksum_address(addr)
 
@@ -44,7 +60,7 @@ def setup_papers(db, web3: Web3, network_config: dict):
     settings/network rather than pinned in config, so a redeploy needs no code
     change here."""
     print("[autonet] Setting up papers...")
-    address = _resolve_substrate_address(db)
+    address = _resolve_substrate_address(db, web3)
     if not address:
         print("[autonet] No substrate address — autonet app idle this run.")
         return {"addresses": [], "papers": {}}
@@ -64,7 +80,7 @@ def run_historical_sync(db, web3: Web3, network_config: dict, alert_func):
 
     Reuses the same Paper + topic dispatch as the live path for consistency."""
     doc_name = network_config.get("firestore_doc_name", "Etherlink-Shadownet")
-    address = _resolve_substrate_address(db)
+    address = _resolve_substrate_address(db, web3)
     if not address:
         print("[autonet] historical sync skipped — no substrate address")
         return

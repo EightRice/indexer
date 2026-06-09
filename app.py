@@ -36,7 +36,7 @@ except ImportError:
 # --- Argument Parsing ---
 parser = argparse.ArgumentParser(description="Unified Indexer for Homebase and AfterMe on Etherlink.")
 parser.add_argument('network', choices=['mainnet', 'testnet', 'shadownet', 'localhost', 'base-sepolia'], help="The network to run.")
-parser.add_argument('app', nargs='?', default='all', choices=['homebase', 'afterme', 'trustless', 'autonet', 'all'], help="The app to index.")
+parser.add_argument('app', nargs='*', default=None, choices=['homebase', 'afterme', 'trustless', 'autonet', 'all'], help="App(s) to index. One or more, or omit for 'all'. E.g. 'shadownet autonet homebase'.")
 
 # Redundancy arguments
 parser.add_argument('--mode', choices=['primary', 'secondary', 'standalone'], default='standalone',
@@ -74,15 +74,18 @@ except Exception as e:
     alert(error_msg)
     sys.exit(1)
 
-# --- Filter Enabled Apps Based on Command-Line Argument ---
-if args.app == 'all':
+# --- Filter Enabled Apps Based on Command-Line Argument(s) ---
+# `app` is a list: ['all'] (default) runs every enabled app; otherwise run the
+# named subset, in the order given, restricted to apps enabled in config.yaml.
+requested = args.app or ['all']   # omitted (None) or empty -> all
+if 'all' in requested:
     apps_to_run = enabled_apps
 else:
-    # Only run the specified app if it's enabled in config
-    if args.app in enabled_apps:
-        apps_to_run = [args.app]
-    else:
-        error_msg = f"App '{args.app}' is not enabled in config.yaml. Enabled apps: {enabled_apps}"
+    apps_to_run = [a for a in requested if a in enabled_apps]
+    missing = [a for a in requested if a not in enabled_apps]
+    if missing:
+        error_msg = (f"App(s) {missing} not enabled in config.yaml. "
+                     f"Enabled apps: {enabled_apps}")
         print(f"FATAL: {error_msg}")
         alert(error_msg)
         sys.exit(1)
