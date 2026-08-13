@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-Backfill `treasuryAddress` for DAO documents that were indexed before the
-treasury fix (see apps/homebase/paper.py::fetch_treasury_address).
+Set `treasuryAddress` = `registryAddress` on DAO documents.
 
 Background
 ----------
-The factory events `NewDaoCreated` and `DaoWrappedDeploymentInfo` do not carry
-the timelock/treasury address, so DAOs indexed before the fix were written to
-Firestore with `treasuryAddress: null`. HomebaseDAO extends OpenZeppelin's
-GovernorTimelockControl, which exposes a public `timelock()` getter returning
-the TimelockController that holds the DAO's funds. This script reads that
-getter per DAO and repairs the document.
+In Homebase EVM DAOs the Registry contract IS the treasury: it holds the
+DAO's funds (with spend caps and earmarking); the OZ TimelockController is
+only the execution-delay mechanism. The app's treasury UI reads
+`registryAddress` everywhere.
+
+An earlier version of this script wrongly populated `treasuryAddress` with
+the timelock address (OpenZeppelin convention, not Homebase's design). This
+version corrects that: it sets `treasuryAddress` to the document's own
+`registryAddress`, overwriting timelock values and filling nulls alike.
+No chain reads are needed; the correct value is already in each document.
 
 Usage
 -----
-Dry run (default -- reads chain + Firestore, writes nothing):
+Dry run (default -- writes nothing):
 
     python backfill_treasury_address.py
     python backfill_treasury_address.py --network shadownet
@@ -23,113 +26,73 @@ Apply the updates:
 
     python backfill_treasury_address.py --network shadownet --apply
 
-Run with no --network to cover every configured network.
-
 Safety
 ------
 - Dry run is the default; `--apply` is required to write.
-- Only documents whose `treasuryAddress` is missing/null/empty are touched.
-  Documents that already have a treasury are never overwritten.
+- Only documents where treasuryAddress != registryAddress are touched.
 - Only the `treasuryAddress` field is written; no other field is modified.
+- Documents with no registryAddress are reported and skipped.
 """
 
 import argparse
-import re
 import sys
 
 import firebase_admin
 from firebase_admin import credentials, firestore
-from web3 import Web3
 
-from apps.homebase.abis import daoAbiGlobal
 from apps.homebase.config import FIREBASE_CREDENTIALS, NETWORKS
 
-ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
-# RPC endpoint per network key (matches app.py).
-RPC_URLS = {
-    "mainnet": "https://node.mainnet.etherlink.com",
-    "testnet": "https://node.ghostnet.etherlink.com",
-    "shadownet": "https://node.shadownet.etherlink.com",
-    "localhost": "http://127.0.0.1:8545",
-    "base-sepolia": "https://sepolia.base.org",
-}
-
-
-def read_timelock(web3, dao_address, abi):
-    """Return the checksummed timelock/treasury address for a DAO, or None."""
-    try:
-        contract = web3.eth.contract(
-            address=Web3.to_checksum_address(dao_address), abi=abi
-        )
-        timelock_address = contract.functions.timelock().call()
-    except Exception as e:
-        print(f"    ERROR reading timelock(): {e}")
-        return None
-
-    if not timelock_address or timelock_address == ZERO_ADDRESS:
-        print("    timelock() returned the zero address")
-        return None
-    return Web3.to_checksum_address(timelock_address)
-
-
-def backfill_network(db, network, apply_changes, abi):
+def correct_network(db, network, apply_changes):
     config = NETWORKS.get(network)
-    rpc_url = RPC_URLS.get(network)
-    if not config or not rpc_url:
+    if not config:
         print(f"Skipping unknown network '{network}'")
         return 0, 0
 
     collection_name = config["dao_collection_name"]
     print(f"\n=== {network} ({collection_name}) ===")
 
-    web3 = Web3(Web3.HTTPProvider(rpc_url))
-    if not web3.is_connected():
-        print(f"  Could not connect to RPC {rpc_url}; skipping.")
-        return 0, 0
-
     fixed = 0
-    failed = 0
+    skipped = 0
     for doc in db.collection(collection_name).stream():
         data = doc.to_dict() or {}
-        existing = data.get("treasuryAddress")
-        if existing:
-            continue  # Already populated -- never overwrite.
-
-        dao_address = data.get("address") or doc.id
+        registry = data.get("registryAddress")
+        treasury = data.get("treasuryAddress")
         name = data.get("name", "<unnamed>")
-        print(f"  {name} ({dao_address}): treasuryAddress is null")
+        dao_address = data.get("address") or doc.id
 
-        treasury = read_timelock(web3, dao_address, abi)
-        if not treasury:
-            failed += 1
+        if not registry:
+            print(f"  {name} ({dao_address}): no registryAddress; SKIPPED")
+            skipped += 1
             continue
+        if treasury == registry:
+            continue  # Already correct.
 
+        print(f"  {name} ({dao_address}): treasuryAddress {treasury!r} -> {registry}")
         if apply_changes:
             try:
                 db.collection(collection_name).document(doc.id).update(
-                    {"treasuryAddress": treasury}
+                    {"treasuryAddress": registry}
                 )
-                print(f"    UPDATED -> {treasury}")
+                print("    UPDATED")
                 fixed += 1
             except Exception as e:
                 print(f"    ERROR writing Firestore: {e}")
-                failed += 1
+                skipped += 1
         else:
-            print(f"    DRY RUN would set -> {treasury}")
             fixed += 1
 
-    return fixed, failed
+    return fixed, skipped
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Backfill null treasuryAddress fields on DAO documents."
+        description="Set treasuryAddress = registryAddress on DAO documents."
     )
     parser.add_argument(
         "--network",
         choices=sorted(NETWORKS.keys()),
-        help="Network to backfill. Omit to process all configured networks.",
+        help="Network to correct. Omit to process all configured networks.",
     )
     parser.add_argument(
         "--apply",
@@ -143,22 +106,21 @@ def main():
         firebase_admin.initialize_app(cred)
     db = firestore.client()
 
-    abi = re.sub(r"\n+", " ", daoAbiGlobal).strip()
     networks = [args.network] if args.network else sorted(NETWORKS.keys())
 
     if not args.apply:
         print("DRY RUN -- no writes will be made. Re-run with --apply to persist.")
 
     total_fixed = 0
-    total_failed = 0
+    total_skipped = 0
     for network in networks:
-        fixed, failed = backfill_network(db, network, args.apply, abi)
+        fixed, skipped = correct_network(db, network, args.apply)
         total_fixed += fixed
-        total_failed += failed
+        total_skipped += skipped
 
     verb = "Updated" if args.apply else "Would update"
-    print(f"\n{verb} {total_fixed} DAO document(s). {total_failed} could not be resolved.")
-    return 1 if total_failed else 0
+    print(f"\n{verb} {total_fixed} DAO document(s). {total_skipped} skipped.")
+    return 0
 
 
 if __name__ == "__main__":
