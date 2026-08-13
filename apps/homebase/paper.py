@@ -77,38 +77,6 @@ class Paper:
             print(f"Error creating specific contract {address}: {e}")
             return None
 
-    def fetch_treasury_address(self, dao_address, dao_contract=None):
-        """Read the DAO's treasury (TimelockController) address from chain.
-
-        The factory events (NewDaoCreated / DaoWrappedDeploymentInfo) do not
-        carry the timelock address, so it has to be read from the DAO contract.
-        HomebaseDAO extends OpenZeppelin's GovernorTimelockControl, which
-        exposes a public `timelock()` getter returning the TimelockController
-        that holds the DAO's funds (i.e. the treasury).
-
-        Returns a checksummed address string, or None if it cannot be read.
-        """
-        if not dao_address:
-            return None
-        if dao_contract is None:
-            dao_contract = self.get_specific_contract(dao_address, daoAbiGlobal)
-        if not dao_contract:
-            print(f"Could not create DAO contract instance to read timelock for {dao_address}")
-            return None
-        try:
-            timelock_address = dao_contract.functions.timelock().call()
-        except Exception as e:
-            print(f"Error fetching timelock() for DAO {dao_address}: {e}")
-            return None
-
-        if not timelock_address or timelock_address == self.ZERO_ADDRESS:
-            print(f"DAO {dao_address} returned an empty timelock address")
-            return None
-
-        treasury_address = Web3.to_checksum_address(timelock_address)
-        print(f"Treasury (timelock) for DAO {dao_address}: {treasury_address}")
-        return treasury_address
-
     def add_dao(self, log):
         contract_instance = self.get_contract()
         if not contract_instance:
@@ -186,10 +154,6 @@ class Paper:
                 org.proposalThreshold = "0"
                 org.quorum = 0
 
-            # Treasury is not part of the NewDaoCreated event; read it from the
-            # DAO contract. Done outside the settings try/except so a failure
-            # above does not also drop the treasury address.
-            org.treasuryAddress = self.fetch_treasury_address(org.address, dao_contract)
         else:
             print(f"WARNING: Could not create contract instance for new DAO {org.address}. Settings will be defaulted to 0.")
             org.votingDelay = 0
@@ -200,6 +164,12 @@ class Paper:
         # executionDelay is correct as it's a dedicated field in the event.
         org.executionDelay = args['executionDelay']
         # --- END OF FIX ---
+
+        # In Homebase EVM DAOs the Registry contract IS the treasury (it holds
+        # funds, with spend caps; the OZ timelock is only the execution-delay
+        # mechanism). The app reads registryAddress for all treasury UI; keep
+        # treasuryAddress consistent with it.
+        org.treasuryAddress = org.registryAddress
 
         supply = 0
         batch = self.db.batch()
@@ -383,10 +353,8 @@ class Paper:
                 org.votingDuration = 0
                 org.executionDelay = 0
 
-        # Treasury is not part of the DaoWrappedDeploymentInfo event either, and
-        # the governance-settings fallback above only runs when the event omits
-        # them. Always read the treasury from the DAO contract.
-        org.treasuryAddress = self.fetch_treasury_address(org.address)
+        # The Registry contract is the treasury (see add_dao note).
+        org.treasuryAddress = org.registryAddress
 
         # Ensure all required fields have defaults
         if not hasattr(org, 'proposalThreshold') or org.proposalThreshold is None:
