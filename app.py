@@ -230,25 +230,44 @@ for app_name in apps_to_run:
         alert(error_msg)
         sys.exit(1)
 
+# --- Sync checkpoints ---
+# Each app's Firestore keeps its own lastSyncedBlock in contracts/<network doc>, so every
+# app's checkpoint stays meaningful. On resume we take the lowest, so no app misses events.
+def _checkpoint_refs():
+    refs = []
+    for name in apps_to_run:
+        doc_name = app_configs.get(name, {}).get('firestore_doc_name')
+        if doc_name and app_dbs.get(name) is not None:
+            refs.append((name, app_dbs[name].collection("contracts").document(doc_name)))
+    return refs
+
+def read_checkpoint():
+    blocks = []
+    for name, ref in _checkpoint_refs():
+        try:
+            doc = ref.get()
+            block = doc.to_dict().get('lastSyncedBlock') if doc.exists else None
+        except Exception as e:
+            print(f"Warning: Could not read lastSyncedBlock for {name}: {e}")
+            continue
+        if block:
+            blocks.append(block)
+    return min(blocks) if blocks else None
+
+def write_checkpoint(block):
+    for name, ref in _checkpoint_refs():
+        try:
+            ref.set({'lastSyncedBlock': block}, merge=True)
+        except Exception as e:
+            print(f"Warning: Could not update lastSyncedBlock for {name}: {e}")
+
 # --- Historical Sync for All Apps ---
 # Only run if: checkpoint exists AND --skip-historical is NOT set
 if args.skip_historical:
     print("\n=== SKIPPING HISTORICAL SYNC (--skip-historical flag) ===")
 else:
     # Check if checkpoint exists
-    checkpoint_exists = False
-    if apps_to_run:
-        try:
-            first_app = apps_to_run[0]
-            db = app_dbs[first_app]
-            network_config = app_configs[first_app]
-            doc_name = network_config.get('firestore_doc_name')
-            contracts_doc = db.collection("contracts").document(doc_name).get()
-            if contracts_doc.exists:
-                checkpoint = contracts_doc.to_dict().get('lastSyncedBlock', 0)
-                checkpoint_exists = checkpoint is not None and checkpoint > 0
-        except:
-            pass
+    checkpoint_exists = read_checkpoint() is not None
 
     if not checkpoint_exists:
         print("\n=== SKIPPING HISTORICAL SYNC (no checkpoint found) ===")
@@ -336,17 +355,8 @@ if redundancy_enabled:
             # Get local last processed block
             local_last_block = state.get_last_processed_block()
 
-            # Try to get Firestore last synced block from the first app
-            first_app = apps_to_run[0]
-            db = app_dbs[first_app]
-            network_config = app_configs[first_app]
-            doc_name = network_config.get('firestore_doc_name')
-
-            # Check contracts collection for lastSyncedBlock
-            network_doc = db.collection("contracts").document(doc_name).get()
-            if network_doc.exists:
-                firestore_last_block = network_doc.to_dict().get('lastSyncedBlock', 0)
-
+            firestore_last_block = read_checkpoint()
+            if firestore_last_block is not None:
                 # If Firestore is significantly ahead, we fell behind
                 if firestore_last_block > local_last_block + 5:
                     print(f"\n!!! ROLE DETECTION: Firestore ahead (block {firestore_last_block}) vs local (block {local_last_block}) !!!")
@@ -448,19 +458,7 @@ while True:
                 last_processed_block = max(0, latest_on_chain - 15)
                 print(f"Skipping historical sync. Starting from block {last_processed_block}.")
             else:
-                # Try to use the checkpoint from contracts collection
-                checkpoint_block = None
-                if apps_to_run:
-                    try:
-                        first_app = apps_to_run[0]
-                        db = app_dbs[first_app]
-                        network_config = app_configs[first_app]
-                        doc_name = network_config.get('firestore_doc_name')
-                        network_doc = db.collection("contracts").document(doc_name).get()
-                        if network_doc.exists:
-                            checkpoint_block = network_doc.to_dict().get('lastSyncedBlock', None)
-                    except:
-                        pass
+                checkpoint_block = read_checkpoint()
 
                 # Use checkpoint if available, otherwise start from latest - 15
                 if checkpoint_block is not None and checkpoint_block > 0:
@@ -665,17 +663,7 @@ while True:
         should_update_checkpoint = logs or (heartbeat % 50 == 0)
 
         if apps_to_run and should_update_checkpoint and should_write_to_firestore:
-            # Update checkpoint in contracts collection (only need to do once, not per-app)
-            try:
-                first_app = apps_to_run[0]
-                db = app_dbs[first_app]
-                network_config = app_configs[first_app]
-                doc_name = network_config.get('firestore_doc_name')
-                if doc_name:
-                    contracts_ref = db.collection("contracts").document(doc_name)
-                    contracts_ref.set({'lastSyncedBlock': last_processed_block}, merge=True)
-            except Exception as e:
-                print(f"Warning: Could not update lastSyncedBlock in Firestore: {e}")
+            write_checkpoint(last_processed_block)
 
         # Send heartbeat to peer
         if redundancy_protocol and current_role in ['primary', 'secondary']:
