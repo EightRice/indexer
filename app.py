@@ -437,6 +437,26 @@ else:
 # --- Main Indexing Loop ---
 heartbeat = 0
 # --- START OF CHANGE: Stateful Indexing Logic ---
+# Some RPCs (like Base Sepolia public nodes) limit the number of addresses per query,
+# so addresses are queried in batches and the results merged in chain order.
+MAX_ADDRESSES_PER_QUERY = 5
+
+def log_position(log_entry):
+    return (log_entry['blockNumber'], log_entry['transactionIndex'], log_entry['logIndex'])
+
+def fetch_logs(addresses, from_block, to_block):
+    if len(addresses) <= MAX_ADDRESSES_PER_QUERY:
+        return list(web3.eth.get_logs({"fromBlock": from_block, "toBlock": to_block, "address": list(addresses)}))
+    found = []
+    num_batches = (len(addresses) + MAX_ADDRESSES_PER_QUERY - 1) // MAX_ADDRESSES_PER_QUERY
+    for i in range(0, len(addresses), MAX_ADDRESSES_PER_QUERY):
+        found.extend(web3.eth.get_logs({"fromBlock": from_block, "toBlock": to_block, "address": addresses[i:i + MAX_ADDRESSES_PER_QUERY]}))
+        # Small delay between batches to avoid rate limiting (50ms per batch)
+        if num_batches > 10 and i + MAX_ADDRESSES_PER_QUERY < len(addresses):
+            time.sleep(0.05)
+    found.sort(key=log_position)
+    return found
+
 last_processed_block = -1  # Sentinel for uninitialized state
 BLOCK_HEADROOM = 3  # Query logs 3 blocks behind the head of the chain for safety
 MAX_BLOCK_RANGE = 500 # Process a maximum of 500 blocks at a time to not overload the RPC
@@ -483,30 +503,22 @@ while True:
             to_block = from_block + MAX_BLOCK_RANGE - 1
             print(f"[{args.network.upper()}] Large gap detected. Processing chunk: {from_block} -> {to_block}")
 
-        # Some RPCs (like Base Sepolia public nodes) limit the number of addresses per query
-        # Batch addresses if we have more than MAX_ADDRESSES_PER_QUERY
-        MAX_ADDRESSES_PER_QUERY = 5
-        logs = []
-
-        if len(listening_to_addresses) <= MAX_ADDRESSES_PER_QUERY:
-            logs = web3.eth.get_logs({"fromBlock": from_block, "toBlock": to_block, "address": listening_to_addresses})
-        else:
-            # Batch the addresses into smaller chunks
-            num_batches = (len(listening_to_addresses) + MAX_ADDRESSES_PER_QUERY - 1) // MAX_ADDRESSES_PER_QUERY
-            for i in range(0, len(listening_to_addresses), MAX_ADDRESSES_PER_QUERY):
-                batch_addresses = listening_to_addresses[i:i + MAX_ADDRESSES_PER_QUERY]
-                batch_logs = web3.eth.get_logs({"fromBlock": from_block, "toBlock": to_block, "address": batch_addresses})
-                logs.extend(batch_logs)
-                # Small delay between batches to avoid rate limiting (50ms per batch)
-                if num_batches > 10 and i + MAX_ADDRESSES_PER_QUERY < len(listening_to_addresses):
-                    time.sleep(0.05)
-            # Sort logs by block number, transaction index, log index to maintain order
-            logs.sort(key=lambda x: (x['blockNumber'], x['transactionIndex'], x['logIndex']))
+        logs = fetch_logs(listening_to_addresses, from_block, to_block)
 
         if logs:
             print(f"[{args.network.upper()}] Found {len(logs)} logs between blocks {from_block} and {to_block}")
 
-        for log_entry in logs:
+        # Contracts discovered mid-batch (new DAOs, tokens, economies, projects) may emit events
+        # later in this same range, so their logs are fetched and merged into the queue as found.
+        pending_logs = list(logs)
+        handled_logs = set()
+        while pending_logs:
+            log_entry = pending_logs.pop(0)
+            log_key = (log_entry["transactionHash"], log_entry["logIndex"])
+            if log_key in handled_logs:
+                continue
+            handled_logs.add(log_key)
+            known_before = set(listening_to_addresses)
             tx_hash = log_entry["transactionHash"].hex()
             # The processed_transactions check was removed from here as it was causing events within the same tx to be skipped.
             # The block-by-block processing already prevents reprocessing old transactions.
@@ -533,10 +545,11 @@ while True:
                 if contract_address in listening_to_addresses: listening_to_addresses.remove(contract_address)
                 if contract_address in papers: del papers[contract_address]
                 print(f"Now listening to {len(listening_to_addresses)} addresses.")
-            elif isinstance(new_contract_info, list) and len(new_contract_info) == 2 and all(isinstance(x, str) for x in new_contract_info):
-                # Homebase: New DAO created (returns [dao_address, token_address])
+            elif isinstance(new_contract_info, list) and len(new_contract_info) in (2, 3) and all(isinstance(x, str) for x in new_contract_info):
+                # Homebase: New DAO created (returns [dao_address, token_address, registry_address])
                 if 'homebase' in apps_to_run:
-                    dao_address_new, token_address_new = new_contract_info
+                    dao_address_new, token_address_new = new_contract_info[:2]
+                    registry_address_new = Web3.to_checksum_address(new_contract_info[2]) if len(new_contract_info) == 3 and new_contract_info[2] else None
                     print(f"Adding new Homebase DAO {dao_address_new} and Token {token_address_new} to listener.")
                     if dao_address_new not in listening_to_addresses: listening_to_addresses.append(dao_address_new)
                     if token_address_new not in listening_to_addresses: listening_to_addresses.append(token_address_new)
@@ -556,6 +569,9 @@ while True:
                         p_new_token = papers[token_address_new]
                     if dao_address_new not in papers:
                         papers.update({dao_address_new: HomebasePaper(token=p_new_token, address=dao_address_new, kind="dao", daos_collection=daos_collection, db=homebase_db, dao=dao_address_new, web3=web3)})
+                    if registry_address_new and registry_address_new not in papers:
+                        listening_to_addresses.append(registry_address_new)
+                        papers.update({registry_address_new: HomebasePaper(address=registry_address_new, kind="registry", daos_collection=daos_collection, db=homebase_db, dao=dao_address_new, web3=web3)})
                     print(f"Now listening to {len(listening_to_addresses)} addresses.")
             elif isinstance(new_contract_info, list) and all(isinstance(item, tuple) for item in new_contract_info):
                 # Homebase: SuiteConfigured returns list of tuples: [('economy', addr), ('registry', addr, dao_addr)]
@@ -648,6 +664,17 @@ while True:
 
                         papers.update({new_will_address: AftermePaper(address=new_will_address, kind="afterme_will", db=afterme_db, web3=web3, wills_collection_name=wills_collection_name)})
                     print(f"Now listening to {len(listening_to_addresses)} addresses.")
+
+            discovered = [a for a in listening_to_addresses if a not in known_before]
+            if discovered:
+                # Include the whole discovering transaction: a project's initial SendFunds is emitted
+                # before the economy's NewProject in the same tx.
+                tx_start = (log_entry['blockNumber'], log_entry['transactionIndex'], -1)
+                later_logs = [l for l in fetch_logs(discovered, log_entry['blockNumber'], to_block)
+                              if log_position(l) > tx_start and (l["transactionHash"], l["logIndex"]) not in handled_logs]
+                if later_logs:
+                    print(f"Fetched {len(later_logs)} later logs for {len(discovered)} newly discovered contract(s).")
+                    pending_logs = sorted(pending_logs + later_logs, key=log_position)
 
         # IMPORTANT: Update our checkpoint after a successful run
         last_processed_block = to_block

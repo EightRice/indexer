@@ -52,6 +52,8 @@ PROJECT_EVENT_SIGNATURES = [
     "AuthorPaid(address,uint256)",
     "VetoedByDao(address)",
     "BackerVoteCast(address,uint256,bool)",
+    "ArbitrationStakeReclaimed(address,uint256)",
+    "OrphanedTokensSwept(address,uint256)",
 ]
 
 # All event signatures combined

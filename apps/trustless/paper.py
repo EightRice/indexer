@@ -77,6 +77,8 @@ class Paper:
                 'AuthorPaid': self.handle_author_paid,
                 'VetoedByDao': self.handle_vetoed_by_dao,
                 'BackerVoteCast': self.handle_backer_vote_cast,
+                'ArbitrationStakeReclaimed': self.handle_arbitration_stake_reclaimed,
+                'OrphanedTokensSwept': self.handle_orphaned_tokens_swept,
             }
             if func in handlers:
                 try:
@@ -172,14 +174,23 @@ class Paper:
             print(f"[trustless] Error getting tx sender: {e}")
             return ""
 
+    def _read_contribution(self, who):
+        """(total, immediate, locked) for a backer, read from the project contract"""
+        read_contract = self.web3.eth.contract(address=self.address, abi=json.loads(projectReadAbi))
+        total, immediate, locked = read_contract.functions.contributions(Web3.to_checksum_address(who)).call()
+        return total, immediate, locked
+
     def _update_amount_from_onchain(self):
         """Read actual balance from on-chain and update Firestore amount field"""
         try:
             read_abi = json.loads(projectReadAbi)
             read_contract = self.web3.eth.contract(address=self.address, abi=read_abi)
 
-            # Check if this is an ERC20 project by reading token address
-            token_address = read_contract.functions.token().call()
+            # ERC20 projects expose token(); native projects don't
+            try:
+                token_address = read_contract.functions.token().call()
+            except Exception:
+                token_address = None
 
             if token_address and token_address != ZERO_ADDRESS:
                 # ERC20 project - get token balance of project contract
@@ -238,7 +249,8 @@ class Paper:
                 contractor=contractor,
                 arbiter=arbiter,
                 tokenAddress=token_address,
-                stage=Stage.OPEN,
+                # Parties named at creation: the contract starts in pending (cooling-off running)
+                stage=Stage.PENDING if contractor not in ("", ZERO_ADDRESS) and arbiter not in ("", ZERO_ADDRESS) else Stage.OPEN,
                 networkName=self.network_collection,
                 economyAddress=self.address,
                 createdAt=created_at,
@@ -249,7 +261,9 @@ class Paper:
                           .document(self.address.lower())
                           .collection("projects")
                           .document(project_address.lower()))
-            project_ref.set(project.to_firestore())
+            # On a replay the doc already reflects later events; don't reset it
+            if not project_ref.get().exists:
+                project_ref.set(project.to_firestore())
 
             # Record transaction
             self._record_transaction(log, "createProject", {
@@ -326,51 +340,18 @@ class Paper:
         how_much = str(args['howMuch'])
         immediate_bps = args['immediateBps']
 
-        # Update project amount
-        project_ref = self._get_project_ref()
-
-        @firestore.transactional
-        def update_in_transaction(transaction):
-            doc = project_ref.get(transaction=transaction)
-            if doc.exists:
-                current_amount = int(doc.to_dict().get('amount', '0'))
-                new_amount = current_amount + int(how_much)
-                transaction.update(project_ref, {'amount': str(new_amount)})
-
-        transaction = self.db.transaction()
-        update_in_transaction(transaction)
-
-        # Upsert backer
+        # Amounts come from contract state rather than running totals, so replaying an event
+        # (restart overlap, retried batch) can't double count.
+        self._update_amount_from_onchain()
+        total, immediate, _locked = self._read_contribution(who)
         backer_ref = self._get_backers_collection().document(who)
-        backer_doc = backer_ref.get()
-
-        if backer_doc.exists:
-            # Update existing backer - weighted average for immediateBps
-            existing = backer_doc.to_dict()
-            existing_contribution = int(existing.get('contribution', '0'))
-            existing_bps = existing.get('immediateBps', 0)
-
-            new_contribution = existing_contribution + int(how_much)
-            # Weighted average of immediateBps
-            if new_contribution > 0:
-                new_bps = ((existing_contribution * existing_bps) +
-                          (int(how_much) * immediate_bps)) // new_contribution
-            else:
-                new_bps = immediate_bps
-
-            backer_ref.update({
-                'contribution': str(new_contribution),
-                'immediateBps': new_bps,
+        if total > 0:
+            backer_ref.set({
+                'address': who,
+                'contribution': str(total),
+                'immediateBps': (immediate * 10000) // total,
                 'lastUpdated': datetime.now(timezone.utc),
-            })
-        else:
-            # Create new backer
-            backer = Backer(
-                address=who,
-                contribution=how_much,
-                immediateBps=immediate_bps,
-            )
-            backer_ref.set(backer.to_firestore())
+            }, merge=True)
 
         self._record_transaction(log, "sendFunds", {
             "amount": how_much,
@@ -461,6 +442,7 @@ class Paper:
         self._get_project_ref().update({
             'stage': Stage.CLOSED,
         })
+        self._update_amount_from_onchain()
 
         self._record_transaction(log, "projectClosed", {
             "by": args['by'],
@@ -588,8 +570,14 @@ class Paper:
         # Update project amount from on-chain balance (funds left the contract)
         self._update_amount_from_onchain()
 
-        # Delete backer document
-        self._get_backers_collection().document(contributor).delete()
+        # Before signing a withdrawal undoes the backing, so the record goes. After close the
+        # contract keeps the contribution (it still counts as spending), so mark it settled.
+        backer_ref = self._get_backers_collection().document(contributor)
+        if self._read_contribution(contributor)[0] == 0:
+            backer_ref.delete()
+        else:
+            backer_ref.set({'settled': True, 'withdrawn': withdrawn_amount,
+                            'lastUpdated': datetime.now(timezone.utc)}, merge=True)
 
         self._record_transaction(log, "withdrawAsContributor", {
             "contributor": contributor,
@@ -633,6 +621,27 @@ class Paper:
         })
 
         print(f"[trustless] VetoedByDao: stage -> closed (0% to contractor)")
+
+    def handle_arbitration_stake_reclaimed(self, log):
+        """Handle ArbitrationStakeReclaimed - contractor took back their half of the arbitration fee"""
+        decoded = self.get_contract().events.ArbitrationStakeReclaimed().process_log(log)
+        args = decoded['args']
+        self._update_amount_from_onchain()
+        self._record_transaction(log, "reclaimArbitrationStake", {
+            "contractor": args['contractor'],
+            "amount": str(args['amount']),
+        })
+        print(f"[trustless] ArbitrationStakeReclaimed: {args['amount']} wei")
+
+    def handle_orphaned_tokens_swept(self, log):
+        """Handle OrphanedTokensSwept - stray tokens sent to the DAO treasury"""
+        decoded = self.get_contract().events.OrphanedTokensSwept().process_log(log)
+        args = decoded['args']
+        self._update_amount_from_onchain()
+        self._record_transaction(log, "sweepOrphanedTokens", {
+            "token": args['token'],
+            "amount": str(args['amount']),
+        })
 
     def handle_backer_vote_cast(self, log):
         """Handle BackerVoteCast - record backer's vote for/against fund release"""
