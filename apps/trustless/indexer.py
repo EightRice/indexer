@@ -132,7 +132,8 @@ def run_historical_sync(db, web3: Web3, network_config: dict, alert_func):
     new_projects = 0
     events_processed = 0
 
-    while processed_from < current_block:
+    failures = 0
+    while processed_from <= current_block:
         to_block = min(processed_from + chunk_size - 1, current_block)
 
         try:
@@ -182,8 +183,16 @@ def run_historical_sync(db, web3: Web3, network_config: dict, alert_func):
                             events_processed += 1
 
         except Exception as e:
-            print(f"[trustless] Error at blocks {processed_from}-{to_block}: {e}")
+            # Never skip a chunk: retry it, and abort (leaving the checkpoint untouched) if it keeps failing.
+            # Handlers are idempotent, so re-running a partly processed chunk is safe.
+            failures += 1
+            print(f"[trustless] Error at blocks {processed_from}-{to_block} (attempt {failures}): {e}")
+            if failures >= 5:
+                raise
+            time.sleep(2 * failures)
+            continue
 
+        failures = 0
         processed_from = to_block + 1
         time.sleep(0.02)
 

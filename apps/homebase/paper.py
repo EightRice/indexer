@@ -6,6 +6,7 @@ from apps.homebase.entities import ProposalStatus, Proposal, StateInContract, Tx
 import re
 from web3 import Web3
 from google.cloud import firestore
+from google.cloud.firestore_v1.field_path import FieldPath
 import codecs
 from apps.generic.converting import decode_function_parameters
 from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi, mint_function_abi, burn_function_abi
@@ -246,7 +247,7 @@ class Paper:
         except Exception as e:
             print(f"Error committing batch for DAO {org.name}: {e}")
 
-        return [org.address, org.govTokenAddress]
+        return [org.address, org.govTokenAddress, org.registryAddress]
 
 
     def add_dao_wrapped(self, log):
@@ -373,7 +374,7 @@ class Paper:
         print(f"[DEBUG] DAO toJson economy field: {dao_json.get('economy')}")
         self.daos_collection.document(org.address).set(dao_json)
         print(f"Successfully added DAO (wrapped) {org.name} / {org.address} to Firestore.")
-        return [org.address, org.govTokenAddress]
+        return [org.address, org.govTokenAddress, org.registryAddress]
 
 
     def configure_economy(self, log):
@@ -531,7 +532,7 @@ class Paper:
                 batch.set(delegator_member_ref, new_member.toJson())
 
         else:
-            batch.update(delegator_member_ref, {"delegate": to_delegate})
+            batch.set(delegator_member_ref, {"delegate": to_delegate}, merge=True)
 
         if to_delegate != self.ZERO_ADDRESS and to_delegate != delegator:
             to_delegate_member_ref = self.daos_collection.document(self.dao).collection('members').document(to_delegate)
@@ -548,15 +549,15 @@ class Paper:
                     new_delegatee_member = Member(address=to_delegate, personalBalance="0", delegate="", votingWeight="0")
                     batch.set(to_delegate_member_ref, new_delegatee_member.toJson())
 
-            batch.update(to_delegate_member_ref, {
+            batch.set(to_delegate_member_ref, {
                 "constituents": firestore.ArrayUnion([delegator])
-            })
+            }, merge=True)
 
         if from_delegate != self.ZERO_ADDRESS and from_delegate != delegator and from_delegate != to_delegate:
             from_delegate_member_ref = self.daos_collection.document(self.dao).collection('members').document(from_delegate)
-            batch.update(from_delegate_member_ref, {
+            batch.set(from_delegate_member_ref, {
                 "constituents": firestore.ArrayRemove([delegator])
-            })
+            }, merge=True)
         
         try:
             batch.commit()
@@ -705,6 +706,9 @@ class Paper:
         
         proposal_votes_collection_ref = self.daos_collection.document(self.dao).collection('proposals').document(proposal_id).collection("votes")
         vote_doc_ref = proposal_votes_collection_ref.document(voter)
+        if vote_doc_ref.get().exists:
+            print(f"Vote by {voter} on proposal {proposal_id} already indexed; skipping replay.")
+            return None
 
         batch = self.db.batch()
         batch.set(vote_doc_ref, vote_obj.toJson())
@@ -1014,7 +1018,7 @@ class Paper:
             return None
 
         try:
-            decoded_event = contract_instance.events.RegistryUpdated().process_log(log)
+            decoded_event = log if 'args' in log else contract_instance.events.RegistryUpdated().process_log(log)
         except Exception as e:
             print(f"Error processing RegistryUpdated log for {self.address}: {e}")
             return None
@@ -1031,7 +1035,7 @@ class Paper:
                 dao_doc_ref = self.daos_collection.document(self.dao)
                 dao_doc_ref.update({
                     'description': value,
-                    'registry.description': value  # Also update in registry map
+                    FieldPath('registry', 'description').to_api_repr(): value  # Also update in registry map
                 })
                 print(f"Updated description for DAO {self.dao}: {value[:50]}...")
             except Exception as e:
@@ -1040,8 +1044,9 @@ class Paper:
             # For other keys, just update the registry map
             try:
                 dao_doc_ref = self.daos_collection.document(self.dao)
+                # Keys contain dots (e.g. jurisdiction.parity.0x...); quote them so they stay flat map keys
                 dao_doc_ref.update({
-                    f'registry.{key}': value
+                    FieldPath('registry', key).to_api_repr(): value
                 })
                 print(f"Updated registry key '{key}' for DAO {self.dao}")
             except Exception as e:
@@ -1049,6 +1054,72 @@ class Paper:
         
         return None
 
+
+    def _member_ref(self, address):
+        return self.daos_collection.document(self.dao).collection('members').document(address)
+
+    def _upsert_member(self, address, fields):
+        """Merge fields into a member doc, creating a full member record if it doesn't exist yet."""
+        ref = self._member_ref(address)
+        if ref.get().exists:
+            ref.set(fields, merge=True)
+        else:
+            member = Member(address=address, personalBalance=fields.get("personalBalance", "0"),
+                            delegate="", votingWeight=fields.get("votingWeight", "0"))
+            ref.set({**member.toJson(), **fields})
+
+    def transfer(self, log):
+        """Token Transfer (incl. mints from REP claims, coin offering, wrapping): refresh both balances."""
+        contract = self.get_contract()
+        if not contract or not self.dao:
+            return None
+        try:
+            args = (log if 'args' in log else contract.events.Transfer().process_log(log))['args']
+        except Exception as e:
+            print(f"Error processing Transfer for {self.address} in DAO {self.dao}: {e}")
+            return None
+        # Balances are read from the token, so replays converge on the true state
+        for party in (args['from'], args['to']):
+            if party == self.ZERO_ADDRESS:
+                continue
+            party = Web3.to_checksum_address(party)
+            balance = str(contract.functions.balanceOf(party).call())
+            self._upsert_member(party, {"personalBalance": balance})
+        if args['from'] == self.ZERO_ADDRESS or args['to'] == self.ZERO_ADDRESS:
+            self.daos_collection.document(self.dao).set(
+                {"totalSupply": str(contract.functions.totalSupply().call())}, merge=True)
+        return None
+
+    def delegate_votes_changed(self, log):
+        contract = self.get_contract()
+        if not contract or not self.dao:
+            return None
+        try:
+            args = (log if 'args' in log else contract.events.DelegateVotesChanged().process_log(log))['args']
+        except Exception as e:
+            print(f"Error processing DelegateVotesChanged for {self.address} in DAO {self.dao}: {e}")
+            return None
+        delegate = Web3.to_checksum_address(args['delegate'])
+        self._upsert_member(delegate, {"votingWeight": str(contract.functions.getVotes(delegate).call())})
+        return None
+
+    def cancel(self, log):
+        contract = self.get_contract()
+        if not contract or not self.dao:
+            return None
+        try:
+            proposal_id = str((log if 'args' in log else contract.events.ProposalCanceled().process_log(log))['args']['proposalId'])
+        except Exception as e:
+            print(f"Error processing ProposalCanceled for {self.address} in DAO {self.dao}: {e}")
+            return None
+        try:
+            self.daos_collection.document(self.dao).collection('proposals').document(proposal_id).update({
+                "statusHistory.canceled": datetime.now(tz=timezone.utc),
+                "latestStage": "Canceled",
+            })
+        except Exception as e:
+            print(f"Error updating proposal {proposal_id} on cancel in DAO {self.dao}: {e}")
+        return None
 
     def handle_event(self, log, func=None):
         # Debug logging
@@ -1078,6 +1149,10 @@ class Paper:
         elif self.kind == "token":
             if func == "DelegateChanged":
                 self.delegate(log)
+            elif func == "Transfer":
+                self.transfer(log)
+            elif func == "DelegateVotesChanged":
+                self.delegate_votes_changed(log)
         elif self.kind == "dao":
             if func == "ProposalCreated":
                 self.propose(log)
@@ -1087,6 +1162,8 @@ class Paper:
                 self.queue(log)
             elif func == "ProposalExecuted":
                 self.execute(log)
+            elif func == "ProposalCanceled":
+                self.cancel(log)
         elif self.kind == "registry":
             if func == "RegistryUpdated":
                 self.registry_updated(log)

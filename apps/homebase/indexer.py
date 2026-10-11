@@ -240,7 +240,7 @@ def run_historical_sync(db, web3, network_config, alert_func):
                                         new_daos_found += 1
                                         print(f"  Found new wrapped DAO: {result[0][:20]}...")
                                 elif event_name == 'SuiteConfigured':
-                                    paper.suite_configured(log)
+                                    paper.configure_economy(log)
                             except Exception as e:
                                 print(f"  Warning: Error processing {event_name} at block {log['blockNumber']}: {e}")
 
@@ -303,6 +303,12 @@ def run_historical_sync(db, web3, network_config, alert_func):
 
                 dao_contract = dao_paper.get_contract()
                 token_contract = token_paper.get_contract()
+                registry_paper = None
+                registry_contract = None
+                if dao_data.get('registryAddress'):
+                    registry_paper = HomebasePaper(address=Web3.to_checksum_address(dao_data['registryAddress']), kind="registry",
+                                                   daos_collection=daos_collection, db=db, web3=web3, dao=dao_address)
+                    registry_contract = registry_paper.get_contract()
 
                 if not dao_contract or not token_contract:
                     print(f"  WARNING: Contract instances not found for DAO {dao_address}, skipping")
@@ -353,6 +359,13 @@ def run_historical_sync(db, web3, network_config, alert_func):
                         )
                         for event in proposal_executed:
                             all_events.append(('ProposalExecuted', event))
+
+                        for event_type, source in (('Transfer', token_contract), ('DelegateVotesChanged', token_contract),
+                                                   ('ProposalCanceled', dao_contract), ('RegistryUpdated', registry_contract)):
+                            if source is None:
+                                continue
+                            for event in getattr(source.events, event_type).get_logs(from_block=from_block_scan, to_block=to_block):
+                                all_events.append((event_type, event))
 
                         from_block_scan = to_block + 1
                         time.sleep(0.1)  # Rate limiting
@@ -423,6 +436,18 @@ def run_historical_sync(db, web3, network_config, alert_func):
                             events_processed += 1
                         elif event_type == 'ProposalExecuted':
                             dao_paper.execute(event)
+                            events_processed += 1
+                        elif event_type == 'Transfer':
+                            token_paper.transfer(event)
+                            events_processed += 1
+                        elif event_type == 'DelegateVotesChanged':
+                            token_paper.delegate_votes_changed(event)
+                            events_processed += 1
+                        elif event_type == 'ProposalCanceled':
+                            dao_paper.cancel(event)
+                            events_processed += 1
+                        elif event_type == 'RegistryUpdated':
+                            registry_paper.registry_updated(event)
                             events_processed += 1
                     except Exception as e:
                         print(f"  - ERROR processing {event_type} event at block {event['blockNumber']}: {e}")
@@ -525,7 +550,7 @@ def setup_papers(db, web3, network_config):
     for doc in homebase_docs:
         obj = doc.to_dict()
         token_address, dao_address = obj.get('token'), obj.get('address')
-        registry_address = obj.get('registryAddress')  # For Economy DAOs
+        registry_address = obj.get('registryAddress')
         if token_address and dao_address:
             addresses.append(token_address)
             token_paper = HomebasePaper(
@@ -548,8 +573,8 @@ def setup_papers(db, web3, network_config):
             papers[token_address] = token_paper
             papers[dao_address] = dao_paper
             
-            # Add registry paper for Economy DAOs (those with an economy address)
-            if registry_address and obj.get('economy'):
+            # Watch every DAO's registry (registry edits from proposals emit RegistryUpdated)
+            if registry_address:
                 addresses.append(registry_address)
                 registry_paper = HomebasePaper(
                     address=registry_address,
@@ -560,7 +585,7 @@ def setup_papers(db, web3, network_config):
                     dao=dao_address
                 )
                 papers[registry_address] = registry_paper
-                print(f"Added registry paper for Economy DAO {dao_address[:10]}... at {registry_address}")
+                print(f"Added registry paper for DAO {dao_address[:10]}... at {registry_address}")
 
     return {
         'addresses': addresses,

@@ -44,6 +44,9 @@ EVENT_SIGNATURES = [
     "DaoWrappedDeploymentInfo(address,address,address,address,string,string,string,uint8,uint256,uint48,uint32,uint256)",
     "SuiteConfigured(address,address,address,address,address,address)",  # TrustlessFactory: deployer, economy, registry, timelock, repToken, dao
     "DelegateChanged(address,address,address)",
+    "DelegateVotesChanged(address,uint256,uint256)",
+    "Transfer(address,address,uint256)",
+    "ProposalCanceled(uint256)",
     "ProposalCreated(uint256,address,address[],uint256[],string[],bytes[],uint256,uint256,string)",
     "ProposalQueued(uint256,uint256)",
     "ProposalExecuted(uint256)",

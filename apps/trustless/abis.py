@@ -32,35 +32,107 @@ projectReadAbi = '''[
     {
         "inputs": [],
         "name": "stage",
-        "outputs": [{"internalType": "uint8", "name": "", "type": "uint8"}],
+        "outputs": [
+            {
+                "internalType": "uint8",
+                "name": "",
+                "type": "uint8"
+            }
+        ],
         "stateMutability": "view",
         "type": "function"
     },
     {
         "inputs": [],
         "name": "token",
-        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "outputs": [
+            {
+                "internalType": "address",
+                "name": "",
+                "type": "address"
+            }
+        ],
         "stateMutability": "view",
         "type": "function"
     },
     {
         "inputs": [],
         "name": "projectValue",
-        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
         "stateMutability": "view",
         "type": "function"
     },
     {
         "inputs": [],
         "name": "arbitrationFeePaidOut",
-        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+        "outputs": [
+            {
+                "internalType": "bool",
+                "name": "",
+                "type": "bool"
+            }
+        ],
         "stateMutability": "view",
         "type": "function"
     },
     {
         "inputs": [],
         "name": "disputeResolution",
-        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "name": "contributions",
+        "outputs": [
+            {
+                "name": "total",
+                "type": "uint256"
+            },
+            {
+                "name": "immediate",
+                "type": "uint256"
+            },
+            {
+                "name": "locked",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "name": "contributorSettled",
+        "outputs": [
+            {
+                "name": "",
+                "type": "bool"
+            }
+        ],
         "stateMutability": "view",
         "type": "function"
     }
@@ -71,9 +143,24 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": false, "internalType": "address", "name": "_contractor", "type": "address"},
-            {"indexed": false, "internalType": "address", "name": "_arbiter", "type": "address"},
-            {"indexed": false, "internalType": "string", "name": "_termsHash", "type": "string"}
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "_contractor",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "_arbiter",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "string",
+                "name": "_termsHash",
+                "type": "string"
+            }
         ],
         "name": "SetParties",
         "type": "event"
@@ -81,9 +168,24 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": false, "internalType": "address", "name": "who", "type": "address"},
-            {"indexed": false, "internalType": "uint256", "name": "howMuch", "type": "uint256"},
-            {"indexed": false, "internalType": "uint256", "name": "immediateBps", "type": "uint256"}
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "who",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "howMuch",
+                "type": "uint256"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "immediateBps",
+                "type": "uint256"
+            }
         ],
         "name": "SendFunds",
         "type": "event"
@@ -91,8 +193,18 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": false, "internalType": "address", "name": "contractor", "type": "address"},
-            {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"}
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "contractor",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            }
         ],
         "name": "ImmediateFundsReleased",
         "type": "event"
@@ -100,7 +212,12 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": false, "internalType": "address", "name": "contractor", "type": "address"}
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "contractor",
+                "type": "address"
+            }
         ],
         "name": "ContractSigned",
         "type": "event"
@@ -108,7 +225,12 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": false, "internalType": "address", "name": "by", "type": "address"}
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "by",
+                "type": "address"
+            }
         ],
         "name": "ProjectDisputed",
         "type": "event"
@@ -116,7 +238,12 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": false, "internalType": "address", "name": "by", "type": "address"}
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "by",
+                "type": "address"
+            }
         ],
         "name": "ProjectClosed",
         "type": "event"
@@ -124,9 +251,24 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": false, "internalType": "address", "name": "arbiter", "type": "address"},
-            {"indexed": false, "internalType": "uint256", "name": "percent", "type": "uint256"},
-            {"indexed": false, "internalType": "string", "name": "rulingHash", "type": "string"}
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "arbiter",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "percent",
+                "type": "uint256"
+            },
+            {
+                "indexed": false,
+                "internalType": "string",
+                "name": "rulingHash",
+                "type": "string"
+            }
         ],
         "name": "ArbitrationDecision",
         "type": "event"
@@ -134,8 +276,18 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": true, "internalType": "address", "name": "appealer", "type": "address"},
-            {"indexed": true, "internalType": "uint256", "name": "proposalId", "type": "uint256"}
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "appealer",
+                "type": "address"
+            },
+            {
+                "indexed": true,
+                "internalType": "uint256",
+                "name": "proposalId",
+                "type": "uint256"
+            }
         ],
         "name": "ArbitrationAppealed",
         "type": "event"
@@ -143,7 +295,12 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": true, "internalType": "address", "name": "finalizer", "type": "address"}
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "finalizer",
+                "type": "address"
+            }
         ],
         "name": "ArbitrationFinalized",
         "type": "event"
@@ -151,9 +308,24 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": true, "internalType": "address", "name": "timelock", "type": "address"},
-            {"indexed": false, "internalType": "uint256", "name": "percent", "type": "uint256"},
-            {"indexed": false, "internalType": "string", "name": "rulingHash", "type": "string"}
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "timelock",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "percent",
+                "type": "uint256"
+            },
+            {
+                "indexed": false,
+                "internalType": "string",
+                "name": "rulingHash",
+                "type": "string"
+            }
         ],
         "name": "DaoOverruled",
         "type": "event"
@@ -161,8 +333,18 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": false, "internalType": "address", "name": "contractor", "type": "address"},
-            {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"}
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "contractor",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            }
         ],
         "name": "ContractorPaid",
         "type": "event"
@@ -170,8 +352,18 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": false, "internalType": "address", "name": "contributor", "type": "address"},
-            {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"}
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "contributor",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            }
         ],
         "name": "ContributorWithdrawn",
         "type": "event"
@@ -179,8 +371,18 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": false, "internalType": "address", "name": "author", "type": "address"},
-            {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"}
+            {
+                "indexed": false,
+                "internalType": "address",
+                "name": "author",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "amount",
+                "type": "uint256"
+            }
         ],
         "name": "AuthorPaid",
         "type": "event"
@@ -188,7 +390,12 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": true, "internalType": "address", "name": "timelock", "type": "address"}
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "timelock",
+                "type": "address"
+            }
         ],
         "name": "VetoedByDao",
         "type": "event"
@@ -196,11 +403,60 @@ projectAbi = '''[
     {
         "anonymous": false,
         "inputs": [
-            {"indexed": true, "internalType": "address", "name": "voter", "type": "address"},
-            {"indexed": false, "internalType": "uint256", "name": "votingPower", "type": "uint256"},
-            {"indexed": false, "internalType": "bool", "name": "forDispute", "type": "bool"}
+            {
+                "indexed": true,
+                "internalType": "address",
+                "name": "voter",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "votingPower",
+                "type": "uint256"
+            },
+            {
+                "indexed": false,
+                "internalType": "bool",
+                "name": "forDispute",
+                "type": "bool"
+            }
         ],
         "name": "BackerVoteCast",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": false,
+                "name": "contractor",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "name": "amount",
+                "type": "uint256"
+            }
+        ],
+        "name": "ArbitrationStakeReclaimed",
+        "type": "event"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": true,
+                "name": "token",
+                "type": "address"
+            },
+            {
+                "indexed": false,
+                "name": "amount",
+                "type": "uint256"
+            }
+        ],
+        "name": "OrphanedTokensSwept",
         "type": "event"
     }
 ]'''
