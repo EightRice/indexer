@@ -69,7 +69,6 @@ class Paper:
                 'ProjectDisputed': self.handle_project_disputed,
                 'ProjectClosed': self.handle_project_closed,
                 'ArbitrationDecision': self.handle_arbitration_decision,
-                'ArbitrationAppealed': self.handle_arbitration_appealed,
                 'ArbitrationFinalized': self.handle_arbitration_finalized,
                 'DaoOverruled': self.handle_dao_overruled,
                 'ContractorPaid': self.handle_contractor_paid,
@@ -473,26 +472,20 @@ class Paper:
 
         print(f"[trustless] ArbitrationDecision: {args['percent']}% -> appealable")
 
-    def handle_arbitration_appealed(self, log):
-        """Handle ArbitrationAppealed - stage becomes appeal"""
-        contract = self.get_contract()
-        if not contract:
+    def handle_appeal_proposal(self, log, proposal_id: int):
+        """A DAO proposal that calls daoOverrule on this project was created: the appeal is underway.
+        Display only; the project's appeal window is long enough for the proposal to finish."""
+        read = self.web3.eth.contract(address=self.address, abi=json.loads(projectReadAbi))
+        governor = read.functions.daoGovernor().call()
+        if Web3.to_checksum_address(governor) != Web3.to_checksum_address(log['address']):
+            print(f"[trustless] Ignoring overrule proposal from a different governor for {self.address}")
             return
-
-        decoded = contract.events.ArbitrationAppealed().process_log(log)
-        args = decoded['args']
-
-        self._get_project_ref().update({
-            'stage': Stage.APPEAL,
-            'appealProposalId': str(args['proposalId']),
-        })
-
+        self._get_project_ref().update({'appealProposalId': str(proposal_id)})
         self._record_transaction(log, "appeal", {
-            "appealer": args['appealer'],
-            "proposalId": str(args['proposalId']),
+            "proposer": self._get_tx_sender(log),
+            "proposalId": str(proposal_id),
         })
-
-        print(f"[trustless] ArbitrationAppealed: proposal {args['proposalId']}")
+        print(f"[trustless] Appeal underway: proposal {proposal_id}")
 
     def handle_arbitration_finalized(self, log):
         """Handle ArbitrationFinalized - stage becomes closed"""
