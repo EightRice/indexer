@@ -7,6 +7,7 @@ import re
 from web3 import Web3
 from google.cloud import firestore
 from google.cloud.firestore_v1.field_path import FieldPath
+from google.api_core.exceptions import NotFound
 import codecs
 from apps.generic.converting import decode_function_parameters
 from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi, mint_function_abi, burn_function_abi
@@ -1046,6 +1047,8 @@ class Paper:
                     FieldPath('registry', 'description').to_api_repr(): value  # Also update in registry map
                 })
                 print(f"Updated description for DAO {self.dao}: {value[:50]}...")
+            except NotFound:
+                print(f"DAO {self.dao} not indexed yet; description comes with NewDaoCreated")
             except Exception as e:
                 print(f"Error updating description for DAO {self.dao}: {e}")
         else:
@@ -1057,6 +1060,9 @@ class Paper:
                     FieldPath('registry', key).to_api_repr(): value
                 })
                 print(f"Updated registry key '{key}' for DAO {self.dao}")
+            except NotFound:
+                # Factory batch edits fire before NewDaoCreated in the same tx; that event carries the keys
+                print(f"DAO {self.dao} not indexed yet; registry key '{key}' comes with NewDaoCreated")
             except Exception as e:
                 print(f"Error updating registry key '{key}' for DAO {self.dao}: {e}")
         
