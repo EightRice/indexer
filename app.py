@@ -444,6 +444,21 @@ MAX_ADDRESSES_PER_QUERY = 5
 def log_position(log_entry):
     return (log_entry['blockNumber'], log_entry['transactionIndex'], log_entry['logIndex'])
 
+DAO_OVERRULE_SELECTOR = Web3.keccak(text="daoOverrule(uint256,string)")[:4]
+PROPOSAL_CREATED_TYPES = ["uint256", "address", "address[]", "uint256[]", "string[]", "bytes[]", "uint256", "uint256", "string"]
+
+def notify_appeal_proposals(log_entry, papers):
+    """A DAO proposal that calls daoOverrule on a trustless project is that project's appeal."""
+    try:
+        from eth_abi import decode
+        proposal_id, _, targets, _, _, calldatas, _, _, _ = decode(PROPOSAL_CREATED_TYPES, bytes(log_entry["data"]))
+        for target, calldata in zip(targets, calldatas):
+            paper = papers.get(Web3.to_checksum_address(target))
+            if getattr(paper, "kind", None) == "project" and calldata[:4] == DAO_OVERRULE_SELECTOR:
+                paper.handle_appeal_proposal(log_entry, proposal_id)
+    except Exception as e:
+        print(f"[trustless] Could not inspect proposal for appeals: {e}")
+
 def fetch_logs(addresses, from_block, to_block):
     if len(addresses) <= MAX_ADDRESSES_PER_QUERY:
         return list(web3.eth.get_logs({"fromBlock": from_block, "toBlock": to_block, "address": list(addresses)}))
@@ -537,6 +552,8 @@ while True:
                 continue  # Skip processing, just monitor
 
             new_contract_info = papers[contract_address].handle_event(log_entry, func=event_name)
+            if event_name == 'ProposalCreated' and 'trustless' in apps_to_run:
+                notify_appeal_proposals(log_entry, papers)
             
             # Handle new contract events dynamically per app
             if new_contract_info == "DELETED":

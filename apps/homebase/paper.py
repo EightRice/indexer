@@ -7,6 +7,7 @@ import re
 from web3 import Web3
 from google.cloud import firestore
 from google.cloud.firestore_v1.field_path import FieldPath
+from google.api_core.exceptions import NotFound
 import codecs
 from apps.generic.converting import decode_function_parameters
 from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi, mint_function_abi, burn_function_abi
@@ -64,6 +65,14 @@ class Paper:
                 return None
         return self.contract
 
+    def _block_time(self, log):
+        """When the event happened on-chain (not when it was indexed, which differs on replays and catch-up)."""
+        try:
+            return datetime.fromtimestamp(self.web3.eth.get_block(log['blockNumber'])['timestamp'], tz=timezone.utc)
+        except Exception as e:
+            print(f"Could not read block time for log at block {log.get('blockNumber')}: {e}")
+            return datetime.now(timezone.utc)
+
     def get_specific_contract(self, address, abi):
         """Helper to get a contract instance with a specific address and ABI."""
         try:
@@ -95,7 +104,7 @@ class Paper:
         print(f"New DAO (original wrapper): {safe_name} from event")
         
         org = Org(name=name)
-        org.creationDate = datetime.now(timezone.utc)
+        org.creationDate = self._block_time(log)
         org.govTokenAddress = args['token']
         org.address = args['dao']
         org.symbol = args['symbol']
@@ -265,7 +274,7 @@ class Paper:
         dao_name = args['daoName']
         print(f"New DAO (wrapped wrapper): {dao_name} from event")
         org = Org(name=dao_name)
-        org.creationDate = datetime.now(timezone.utc)
+        org.creationDate = self._block_time(log)
         org.govTokenAddress = args['wrappedTokenAddress']
         org.address = args['daoAddress']
         org.symbol = args['wrappedTokenSymbol']
@@ -625,7 +634,7 @@ class Paper:
         p.values = values
         p.description = desc
         p.callDatas = calldatas
-        p.createdAt = datetime.now(tz=timezone.utc)
+        p.createdAt = self._block_time(log)
         p.votingStartsBlock = str(vote_start_block)
         p.votingEndsBlock = str(vote_end_block)
         p.externalResource = link
@@ -793,7 +802,7 @@ class Paper:
         
         try:
             proposal_doc_ref.update({
-                "statusHistory.queued": datetime.now(tz=timezone.utc),
+                "statusHistory.queued": self._block_time(log),
                 "latestStage": "Queued",
                 
             })
@@ -885,7 +894,7 @@ class Paper:
         prop_data_from_db = proposal_snapshot.to_dict()
         
         updates_for_proposal = {
-            "statusHistory.executed": datetime.now(tz=timezone.utc),
+            "statusHistory.executed": self._block_time(log),
             "latestStage": "Executed",
             "executionHash": event['transactionHash'].hex()
         }
@@ -1038,6 +1047,8 @@ class Paper:
                     FieldPath('registry', 'description').to_api_repr(): value  # Also update in registry map
                 })
                 print(f"Updated description for DAO {self.dao}: {value[:50]}...")
+            except NotFound:
+                print(f"DAO {self.dao} not indexed yet; description comes with NewDaoCreated")
             except Exception as e:
                 print(f"Error updating description for DAO {self.dao}: {e}")
         else:
@@ -1049,6 +1060,9 @@ class Paper:
                     FieldPath('registry', key).to_api_repr(): value
                 })
                 print(f"Updated registry key '{key}' for DAO {self.dao}")
+            except NotFound:
+                # Factory batch edits fire before NewDaoCreated in the same tx; that event carries the keys
+                print(f"DAO {self.dao} not indexed yet; registry key '{key}' comes with NewDaoCreated")
             except Exception as e:
                 print(f"Error updating registry key '{key}' for DAO {self.dao}: {e}")
         
@@ -1114,7 +1128,7 @@ class Paper:
             return None
         try:
             self.daos_collection.document(self.dao).collection('proposals').document(proposal_id).update({
-                "statusHistory.canceled": datetime.now(tz=timezone.utc),
+                "statusHistory.canceled": self._block_time(log),
                 "latestStage": "Canceled",
             })
         except Exception as e:

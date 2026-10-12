@@ -44,7 +44,6 @@ PROJECT_EVENT_SIGNATURES = [
     "ProjectDisputed(address)",
     "ProjectClosed(address)",
     "ArbitrationDecision(address,uint256,string)",
-    "ArbitrationAppealed(address,uint256)",
     "ArbitrationFinalized(address)",
     "DaoOverruled(address,uint256,string)",
     "ContractorPaid(address,uint256)",
