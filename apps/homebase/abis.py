@@ -4256,6 +4256,13 @@ registryAbi = '''
     }
 ]'''
 
+# Economy: the DAO addresses it was wired to (economy module, jurisdiction.economy)
+economy_addresses_abi = [
+    {"inputs": [], "name": name, "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+     "stateMutability": "view", "type": "function"}
+    for name in ("timelockAddress", "registryAddress", "governorAddress", "repTokenAddress")
+]
+
 # TrustlessFactory ABI - includes NewDaoCreated and SuiteConfigured events
 trustless_wrapper_abi = '''
 [

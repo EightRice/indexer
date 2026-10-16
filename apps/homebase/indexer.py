@@ -53,6 +53,7 @@ def initialize(db, web3, network_config):
             - wrapper_address: str - Main wrapper contract address
             - wrapper_w_address: str - Wrapped wrapper address
             - wrapper_trustless_address: str or None - Trustless wrapper address
+            - jurisdiction_factory_address: str or None - JurisdictionFactory address
             - event_signatures: dict - Event signature hashes mapped to event names
             - trustless_db: Firestore client for Trustless or None
     """
@@ -71,8 +72,12 @@ def initialize(db, web3, network_config):
     wrapper_t_address = homebase_config.get('wrapper_t')  # Transferable non-wrapped
     wrapper_w_address = homebase_config.get('wrapper_w')  # Wrapped ERC20 tokens
     wrapper_trustless_address = homebase_config.get('wrapper_trustless', None)
+    jurisdiction_factory_address = homebase_config.get('jurisdictionFactory')
 
-    print(f"Homebase Wrapper (NON-TRANSFERABLE): {wrapper_address}")
+    if jurisdiction_factory_address:
+        print(f"Homebase JurisdictionFactory: {jurisdiction_factory_address}")
+    if wrapper_address:
+        print(f"Homebase Wrapper (NON-TRANSFERABLE): {wrapper_address}")
     if wrapper_t_address:
         print(f"Homebase Wrapper_t (TRANSFERABLE): {wrapper_t_address}")
     if wrapper_w_address:
@@ -95,6 +100,7 @@ def initialize(db, web3, network_config):
         'wrapper_t_address': wrapper_t_address,
         'wrapper_w_address': wrapper_w_address,
         'wrapper_trustless_address': wrapper_trustless_address,
+        'jurisdiction_factory_address': jurisdiction_factory_address,
         'event_signatures': event_sigs,
         'trustless_db': trustless_db
     }
@@ -154,8 +160,10 @@ def run_historical_sync(db, web3, network_config, alert_func):
             wrapper_t_address = homebase_contracts_config.get('wrapper_t')
             wrapper_w_address = homebase_contracts_config.get('wrapper_w')
             wrapper_trustless_address = homebase_contracts_config.get('wrapper_trustless')
+            jurisdiction_factory_address = homebase_contracts_config.get('jurisdictionFactory')
 
-            wrapper_addresses = [addr for addr in [wrapper_address, wrapper_t_address, wrapper_w_address, wrapper_trustless_address] if addr]
+            wrapper_addresses = [addr for addr in [wrapper_address, wrapper_t_address, wrapper_w_address, wrapper_trustless_address,
+                                                   jurisdiction_factory_address] if addr]
 
             if wrapper_addresses:
                 # Build event signature hashes for factory events
@@ -195,6 +203,11 @@ def run_historical_sync(db, web3, network_config, alert_func):
                         address=wrapper_trustless_address, kind="wrapper_trustless",
                         daos_collection=daos_collection, db=db, web3=web3,
                         trustless_db=trustless_db, trustless_network_collection=trustless_network_collection
+                    )
+                if jurisdiction_factory_address:
+                    wrapper_papers[jurisdiction_factory_address] = HomebasePaper(
+                        address=jurisdiction_factory_address, kind="jurisdiction",
+                        daos_collection=daos_collection, db=db, web3=web3
                     )
 
                 # Scan for factory events in chunks
@@ -307,7 +320,9 @@ def run_historical_sync(db, web3, network_config, alert_func):
                 registry_contract = None
                 if dao_data.get('registryAddress'):
                     registry_paper = HomebasePaper(address=Web3.to_checksum_address(dao_data['registryAddress']), kind="registry",
-                                                   daos_collection=daos_collection, db=db, web3=web3, dao=dao_address)
+                                                   daos_collection=daos_collection, db=db, web3=web3, dao=dao_address,
+                                                   trustless_db=_init_trustless_firebase(),
+                                                   trustless_network_collection=trustless_network_collection)
                     registry_contract = registry_paper.get_contract()
 
                 if not dao_contract or not token_contract:
@@ -491,6 +506,7 @@ def setup_papers(db, web3, network_config):
     wrapper_t_address = homebase_config.get('wrapper_t')  # Transferable non-wrapped
     wrapper_w_address = homebase_config.get('wrapper_w')  # Wrapped ERC20 tokens
     wrapper_trustless_address = homebase_config.get('wrapper_trustless', None)
+    jurisdiction_factory_address = homebase_config.get('jurisdictionFactory')
 
     daos_collection = db.collection(dao_collection_name)
     homebase_docs = list(daos_collection.stream())
@@ -501,7 +517,11 @@ def setup_papers(db, web3, network_config):
 
     # Create Paper objects
     papers = {}
-    addresses = [wrapper_address]
+    addresses = []
+    if wrapper_address:
+        addresses.append(wrapper_address)
+    if jurisdiction_factory_address:
+        addresses.append(jurisdiction_factory_address)
     if wrapper_t_address:
         addresses.append(wrapper_t_address)
     if wrapper_w_address:
@@ -509,14 +529,23 @@ def setup_papers(db, web3, network_config):
     if wrapper_trustless_address:
         addresses.append(wrapper_trustless_address)
 
-    # Wrapper papers
-    papers[wrapper_address] = HomebasePaper(
-        address=wrapper_address,
-        kind="wrapper",
-        daos_collection=daos_collection,
-        db=db,
-        web3=web3
-    )
+    # Factory papers
+    if jurisdiction_factory_address:
+        papers[jurisdiction_factory_address] = HomebasePaper(
+            address=jurisdiction_factory_address,
+            kind="jurisdiction",
+            daos_collection=daos_collection,
+            db=db,
+            web3=web3
+        )
+    if wrapper_address:
+        papers[wrapper_address] = HomebasePaper(
+            address=wrapper_address,
+            kind="wrapper",
+            daos_collection=daos_collection,
+            db=db,
+            web3=web3
+        )
     if wrapper_t_address:
         papers[wrapper_t_address] = HomebasePaper(
             address=wrapper_t_address,
@@ -573,7 +602,8 @@ def setup_papers(db, web3, network_config):
             papers[token_address] = token_paper
             papers[dao_address] = dao_paper
             
-            # Watch every DAO's registry (registry edits from proposals emit RegistryUpdated)
+            # Watch every DAO's registry (registry edits from proposals emit RegistryUpdated;
+            # jurisdiction.economy attaches or detaches the Economy)
             if registry_address:
                 addresses.append(registry_address)
                 registry_paper = HomebasePaper(
@@ -582,7 +612,9 @@ def setup_papers(db, web3, network_config):
                     daos_collection=daos_collection,
                     db=db,
                     web3=web3,
-                    dao=dao_address
+                    dao=dao_address,
+                    trustless_db=trustless_db,
+                    trustless_network_collection=trustless_network_collection
                 )
                 papers[registry_address] = registry_paper
                 print(f"Added registry paper for DAO {dao_address[:10]}... at {registry_address}")

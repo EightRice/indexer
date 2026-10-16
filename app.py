@@ -588,10 +588,13 @@ while True:
                         papers.update({dao_address_new: HomebasePaper(token=p_new_token, address=dao_address_new, kind="dao", daos_collection=daos_collection, db=homebase_db, dao=dao_address_new, web3=web3)})
                     if registry_address_new and registry_address_new not in papers:
                         listening_to_addresses.append(registry_address_new)
-                        papers.update({registry_address_new: HomebasePaper(address=registry_address_new, kind="registry", daos_collection=daos_collection, db=homebase_db, dao=dao_address_new, web3=web3)})
+                        papers.update({registry_address_new: HomebasePaper(address=registry_address_new, kind="registry", daos_collection=daos_collection, db=homebase_db, dao=dao_address_new, web3=web3,
+                                                                           trustless_db=homebase_data.get('trustless_db'),
+                                                                           trustless_network_collection=app_configs['homebase'].get('trustless_network_collection'))})
                     print(f"Now listening to {len(listening_to_addresses)} addresses.")
             elif isinstance(new_contract_info, list) and all(isinstance(item, tuple) for item in new_contract_info):
-                # Homebase: SuiteConfigured returns list of tuples: [('economy', addr), ('registry', addr, dao_addr)]
+                # Homebase: SuiteConfigured returns list of tuples: [('economy', addr), ('registry', addr, dao_addr)];
+                # a registry's jurisdiction.economy entry returns [('economy', addr)]
                 for item in new_contract_info:
                     if item[0] == 'economy' and 'trustless' in apps_to_run:
                         economy_address_new = Web3.to_checksum_address(item[1])
@@ -630,6 +633,8 @@ while True:
                                 db=homebase_db,
                                 dao=dao_address_for_registry,
                                 web3=web3,
+                                trustless_db=homebase_data.get('trustless_db'),
+                                trustless_network_collection=app_configs['homebase'].get('trustless_network_collection'),
                             )})
                         print(f"Now listening to {len(listening_to_addresses)} addresses.")
             elif isinstance(new_contract_info, str) and new_contract_info.startswith("0x"):

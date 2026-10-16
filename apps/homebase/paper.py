@@ -1,6 +1,6 @@
 # apps/homebase/paper.py
 
-from apps.homebase.abis import wrapperAbi, daoAbiGlobal, tokenAbiGlobal, wrapper_token_abi, timelock_min_delay_abi, wrapper_w_abi, trustless_wrapper_abi, registryAbi
+from apps.homebase.abis import wrapperAbi, daoAbiGlobal, tokenAbiGlobal, wrapper_token_abi, timelock_min_delay_abi, wrapper_w_abi, trustless_wrapper_abi, registryAbi, economy_addresses_abi
 from datetime import datetime, timezone, timedelta
 from apps.homebase.entities import ProposalStatus, Proposal, StateInContract, Txaction, Token, Member, Org, Vote
 import re
@@ -25,11 +25,14 @@ class Paper:
         self.daos_collection = daos_collection
         self.db = db
         self.abi_string = None
-        # Trustless cross-write support (only used by wrapper_trustless)
+        # Trustless cross-write support (wrapper_trustless, and registries for jurisdiction.economy)
         self.trustless_db = trustless_db
         self.trustless_network_collection = trustless_network_collection
 
         if kind == "wrapper":
+            self.abi_string = wrapperAbi
+        elif kind == "jurisdiction":
+            # JurisdictionFactory: every DAO, any token kind, emits NewDaoCreated
             self.abi_string = wrapperAbi
         elif kind == "wrapper_t":
             # Transferable non-wrapped token factory (emits NewDaoCreated)
@@ -134,6 +137,15 @@ class Paper:
         else:
             org.decimals = 18
             org.nonTransferrable = False
+
+        # Wrapped-token DAOs from the JurisdictionFactory also emit NewDaoCreated
+        wrapped_contract = self.get_specific_contract(org.govTokenAddress, wrapper_token_abi)
+        if wrapped_contract:
+            try:
+                org.underlyingToken = str(wrapped_contract.functions.underlying().call())
+                print(f"Token {org.govTokenAddress} wraps {org.underlyingToken}")
+            except Exception:
+                pass  # not a WrappedRepToken
         
         # --- START OF FIX ---
         # The previous logic incorrectly tried to read settings from the 'initialAmounts' array.
@@ -1065,7 +1077,76 @@ class Paper:
                 print(f"DAO {self.dao} not indexed yet; registry key '{key}' comes with NewDaoCreated")
             except Exception as e:
                 print(f"Error updating registry key '{key}' for DAO {self.dao}: {e}")
-        
+
+            # The economy module, attached at origination or by proposal, or detached ("")
+            if key == 'jurisdiction.economy':
+                return self.economy_attached(log, value) if value else self.economy_detached()
+
+        return None
+
+    def economy_attached(self, log, value):
+        """
+        jurisdiction.economy set: link the Economy to the DAO doc and cross-write its Economy
+        document to the Trustless Firestore. Returns [('economy', addr)] so the main loop
+        listens to it.
+        """
+        try:
+            economy_address = Web3.to_checksum_address(value)
+        except Exception as e:
+            print(f"Invalid jurisdiction.economy value '{value}' for DAO {self.dao}: {e}")
+            return None
+        print(f"jurisdiction.economy: DAO {self.dao} linked to Economy {economy_address}")
+
+        try:
+            self.daos_collection.document(self.dao).update({'economy': economy_address})
+            print(f"Updated DAO {self.dao} with economy address {economy_address}")
+        except NotFound:
+            print(f"DAO {self.dao} not indexed yet; cannot link economy {economy_address}")
+        except Exception as e:
+            print(f"Error updating DAO {self.dao} with economy address: {e}")
+
+        if self.trustless_db and self.trustless_network_collection:
+            try:
+                economy_contract = self.get_specific_contract(economy_address, economy_addresses_abi)
+                block_number = log['blockNumber']
+                created_at = self._block_time(log)
+                creator = self.web3.eth.get_transaction(log['transactionHash'])['from']
+                economy_address_lower = economy_address.lower()
+                economy_data = {
+                    'address': economy_address_lower,
+                    'daoAddress': economy_contract.functions.governorAddress().call().lower(),
+                    'registryAddress': economy_contract.functions.registryAddress().call().lower(),
+                    'timelockAddress': economy_contract.functions.timelockAddress().call().lower(),
+                    'repTokenAddress': economy_contract.functions.repTokenAddress().call().lower(),
+                    'creator': creator.lower(),
+                    'createdAt': created_at,
+                    'createdAtBlock': block_number,
+                    'detached': False,
+                }
+                # Merge: an economy re-attached later keeps what the trustless indexer wrote
+                self.trustless_db.collection(self.trustless_network_collection).document(economy_address_lower).set(economy_data, merge=True)
+                print(f"Created Economy document in Trustless Firestore: {economy_address_lower}")
+            except Exception as e:
+                print(f"Error creating Economy document in Trustless Firestore: {e}")
+        else:
+            print("Trustless DB not configured - skipping cross-write")
+
+        return [('economy', economy_address)]
+
+    def economy_detached(self):
+        """jurisdiction.economy cleared: unlink the DAO doc. Its projects keep running, so the
+        Trustless Economy document stays, marked detached."""
+        try:
+            snap = self.daos_collection.document(self.dao).get()
+            previous = (snap.to_dict() or {}).get('economy') if snap.exists else None
+            if snap.exists:
+                snap.reference.update({'economy': firestore.DELETE_FIELD})
+                print(f"DAO {self.dao} economy detached")
+            if previous and self.trustless_db and self.trustless_network_collection:
+                self.trustless_db.collection(self.trustless_network_collection).document(previous.lower()).set(
+                    {'detached': True}, merge=True)
+        except Exception as e:
+            print(f"Error detaching economy from DAO {self.dao}: {e}")
         return None
 
 
@@ -1139,7 +1220,7 @@ class Paper:
         # Debug logging
         print(f"[DEBUG handle_event] kind={self.kind}, func={func}, address={self.address}")
 
-        if self.kind == "wrapper":
+        if self.kind in ("wrapper", "jurisdiction"):
             if func == "NewDaoCreated":
                 return self.add_dao(log)
         elif self.kind == "wrapper_t":
@@ -1180,6 +1261,6 @@ class Paper:
                 self.cancel(log)
         elif self.kind == "registry":
             if func == "RegistryUpdated":
-                self.registry_updated(log)
+                return self.registry_updated(log)
         return None
 # apps/homebase/paper.py
