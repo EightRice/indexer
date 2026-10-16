@@ -468,3 +468,15 @@ projectAbi = '''[
     }
 ]'''
 
+
+
+# NativeProject / ERC20Project: register a live DAO proposal that vetoes or overrules the project
+register_dao_proposal_abi = [{
+    "type": "function", "name": "registerDaoProposal", "stateMutability": "nonpayable", "outputs": [],
+    "inputs": [
+        {"name": "targets", "type": "address[]"},
+        {"name": "values", "type": "uint256[]"},
+        {"name": "calldatas", "type": "bytes[]"},
+        {"name": "descriptionHash", "type": "bytes32"},
+    ],
+}]

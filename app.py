@@ -445,17 +445,58 @@ def log_position(log_entry):
     return (log_entry['blockNumber'], log_entry['transactionIndex'], log_entry['logIndex'])
 
 DAO_OVERRULE_SELECTOR = Web3.keccak(text="daoOverrule(uint256,string)")[:4]
+DAO_VETO_SELECTOR = Web3.keccak(text="daoVeto()")[:4]
 PROPOSAL_CREATED_TYPES = ["uint256", "address", "address[]", "uint256[]", "string[]", "bytes[]", "uint256", "uint256", "string"]
 
+# Registers DAO proposals on the projects they veto or overrule, so the project holds signing and
+# finalizing until the proposal resolves. Anyone may register; this is the automatic path. The key
+# only pays gas: INDEXER_RELAYER_KEY, or on localhost hardhat's public account #9.
+HARDHAT_ACCOUNT_9 = "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6"
+relayer_key = os.getenv("INDEXER_RELAYER_KEY") or (HARDHAT_ACCOUNT_9 if args.network == "localhost" else None)
+if not relayer_key:
+    print("No INDEXER_RELAYER_KEY: DAO proposals won't be registered on projects automatically")
+
+def register_on_project(project, targets, values, calldatas, description):
+    from apps.trustless.abis import register_dao_proposal_abi
+    account = web3.eth.account.from_key(relayer_key)
+    contract = web3.eth.contract(address=project, abi=register_dao_proposal_abi)
+    fn = contract.functions.registerDaoProposal(targets, values, calldatas, Web3.keccak(text=description))
+    try:
+        fn.call({"from": account.address})
+    except Exception as e:
+        # Already registered by someone, closed, no longer live: nothing to do
+        print(f"[trustless] Not registering on {project}: {e}")
+        return
+    tx = fn.build_transaction({"from": account.address, "nonce": web3.eth.get_transaction_count(account.address, "pending")})
+    signed = account.sign_transaction(tx)
+    tx_hash = web3.eth.send_raw_transaction(signed.raw_transaction)
+    receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+    print(f"[trustless] Registered DAO proposal on {project}: status {receipt.status}, tx {tx_hash.hex()}")
+
 def notify_appeal_proposals(log_entry, papers):
-    """A DAO proposal that calls daoOverrule on a trustless project is that project's appeal."""
+    """A DAO proposal that calls daoVeto or daoOverrule on a trustless project: an overrule is that
+    project's appeal (shown on the project), and either is registered on the project so it holds."""
     try:
         from eth_abi import decode
-        proposal_id, _, targets, _, _, calldatas, _, _, _ = decode(PROPOSAL_CREATED_TYPES, bytes(log_entry["data"]))
+        proposal_id, _, targets, values, _, calldatas, _, _, description = decode(PROPOSAL_CREATED_TYPES, bytes(log_entry["data"]))
+        projects = []
         for target, calldata in zip(targets, calldatas):
-            paper = papers.get(Web3.to_checksum_address(target))
-            if getattr(paper, "kind", None) == "project" and calldata[:4] == DAO_OVERRULE_SELECTOR:
+            address = Web3.to_checksum_address(target)
+            paper = papers.get(address)
+            if getattr(paper, "kind", None) != "project":
+                continue
+            if calldata[:4] == DAO_OVERRULE_SELECTOR:
                 paper.handle_appeal_proposal(log_entry, proposal_id)
+            if calldata[:4] in (DAO_OVERRULE_SELECTOR, DAO_VETO_SELECTOR) and address not in projects:
+                projects.append(address)
+        if relayer_key:
+            checksummed = [Web3.to_checksum_address(t) for t in targets]
+            for project in projects:
+                try:
+                    register_on_project(project, checksummed, list(values), list(calldatas), description)
+                except Exception as e:
+                    print(f"[trustless] Could not register proposal {proposal_id} on {project}: {e}")
+                    alert(f"Could not register DAO proposal {proposal_id} on project {project}: {e}")
     except Exception as e:
         print(f"[trustless] Could not inspect proposal for appeals: {e}")
 
