@@ -150,6 +150,7 @@ class Proposal:
         self.type: Optional[str] = None
         self.name: Optional[str] = name if name else "Title of the proposal (max 80 characters)"
         self.description: Optional[str] = "(no description)"
+        self.rawDescription: str = ""  # the on-chain description, as proposed
         self.author: Optional[str] = None
         self.value: float = 0.0
         self.targets: List[str] = []
@@ -185,6 +186,7 @@ class Proposal:
             'type': self.type,
             'title': self.name,
             'description': self.description,
+            'rawDescription': self.rawDescription,
             'author': self.author,
             'calldata': self.callData,
             'createdAt': self.createdAt,

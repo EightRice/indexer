@@ -12,6 +12,26 @@ import codecs
 from apps.generic.converting import decode_function_parameters
 from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi, mint_function_abi, burn_function_abi
 
+
+ATN_EPOCH_SELECTOR = Web3.keccak(text="anchor(string,bytes32,bytes32,bytes32,string,bytes32,bytes32)")[:4]
+ATN_EPOCH_TYPES = ["string", "bytes32", "bytes32", "bytes32", "string", "bytes32", "bytes32"]
+ATN_EPOCH_FIELDS = ["epochId", "epochRoot", "prevEpochRoot", "prevAnchorHash", "agentMintCid", "payloadHash", "agentMintRoot"]
+
+
+def _decode_atn_epoch(calldatas):
+    """The Substrate.anchor arguments if the proposal is exactly one anchor call, else None."""
+    if len(calldatas) != 1:
+        return None
+    data = bytes(calldatas[0]) if not isinstance(calldatas[0], str) else bytes.fromhex(calldatas[0].removeprefix("0x"))
+    if data[:4] != ATN_EPOCH_SELECTOR:
+        return None
+    try:
+        from eth_abi import decode
+        values = decode(ATN_EPOCH_TYPES, data[4:])
+    except Exception:
+        return None
+    return {k: ("0x" + v.hex() if isinstance(v, bytes) else v) for k, v in zip(ATN_EPOCH_FIELDS, values)}
+
 class Paper:
     ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
     def __init__(self, address, kind, web3, daos_collection, db, dao=None, token=None,
@@ -638,10 +658,24 @@ class Paper:
             desc = description_full if description_full else "(No Description Provided)"
             link = "(No Link Provided)"
 
+        # A daemon's epoch anchor: one call to Substrate.anchor, described in plain text
+        anchor = _decode_atn_epoch(calldatas_raw)
+        if anchor is not None:
+            type_ = "atn epoch"
+            name = f"ATN epoch {anchor['epochId']}"
+            desc = (f"Anchors Autonet epoch {anchor['epochId']} on the Substrate.\n"
+                    f"Epoch root: {anchor['epochRoot']}\n"
+                    f"Previous epoch root: {anchor['prevEpochRoot']}\n"
+                    f"Previous anchor: {anchor['prevAnchorHash']}\n"
+                    f"Agent mints: {anchor['agentMintCid'] or '(none)'} (root {anchor['agentMintRoot']})\n"
+                    f"Payload hash: {anchor['payloadHash']}")
+
         p = Proposal(name=name, org=self.dao)
         p.author = proposer
         p.id = proposal_id
         p.type = type_
+        # The exact description, so queue and execute can rebuild the proposal id
+        p.rawDescription = description_full
         p.targets = targets
         p.values = values
         p.description = desc
