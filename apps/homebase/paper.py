@@ -626,10 +626,19 @@ class Paper:
             desc = description_full if description_full else "(No Description Provided)"
             link = "(No Link Provided)"
 
+        # The proposer controls the description, so the type written there is
+        # advisory. What the proposal does is decided by its actions.
+        declared_type = type_
+        if len(targets) > 1 and type_.lower() != "batch":
+            type_ = "batch"
+        elif len(targets) >= 1 and type_.lower() in ("offchain", ""):
+            type_ = "custom"
+
         p = Proposal(name=name, org=self.dao)
         p.author = proposer
         p.id = proposal_id
         p.type = type_
+        p.declaredType = declared_type
         p.targets = targets
         p.values = values
         p.description = desc
@@ -998,6 +1007,11 @@ class Paper:
 
             
 
+            # Whatever the proposal was labelled, the governance settings and
+            # the token supply are re-read from the chain after execution, so
+            # the stored values cannot be steered by the description.
+            self._refresh_dao_settings(dao_updates, proposal_targets_db)
+
             if dao_updates:
                 dao_doc_ref.update(dao_updates)
             proposal_doc_ref.update(updates_for_proposal)
@@ -1009,6 +1023,31 @@ class Paper:
             print(traceback.format_exc())
 
 
+
+    def _refresh_dao_settings(self, dao_updates, targets=None):
+        """Reads the governor's settings (and the token supply when the token
+        was a target) from the chain into dao_updates."""
+        try:
+            dao_contract = self.get_specific_contract(self.dao, daoAbiGlobal)
+            if dao_contract:
+                dao_updates["votingDelay"] = dao_contract.functions.votingDelay().call() // 60
+                dao_updates["votingDuration"] = dao_contract.functions.votingPeriod().call() // 60
+                dao_updates["quorum"] = int(dao_contract.functions.quorumNumerator().call())
+                raw_threshold = int(dao_contract.functions.proposalThreshold().call())
+                dao_snapshot = self.daos_collection.document(self.dao).get()
+                decimals = int(dao_snapshot.to_dict().get('decimals', 18)) if dao_snapshot.exists else 18
+                dao_updates["proposalThreshold"] = str(raw_threshold // (10 ** decimals))
+        except Exception as e:
+            print(f"Warning: could not refresh settings for DAO {self.dao} from chain: {e}")
+        try:
+            token_address = self.token_paper.address if self.token_paper else None
+            touched = {str(t).lower() for t in (targets or [])}
+            if token_address and token_address.lower() in touched:
+                token_contract = self.get_specific_contract(token_address, tokenAbiGlobal)
+                if token_contract:
+                    dao_updates["totalSupply"] = str(token_contract.functions.totalSupply().call())
+        except Exception as e:
+            print(f"Warning: could not refresh total supply for DAO {self.dao}: {e}")
 
     def registry_updated(self, log):
         """

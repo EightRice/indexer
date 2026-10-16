@@ -148,6 +148,9 @@ class Proposal:
         self.totalSupply: str = "0"
         self.org: Org = org
         self.type: Optional[str] = None
+        # The type the proposer wrote into the description; `type` is what the
+        # indexer decided after looking at the actions.
+        self.declaredType: Optional[str] = None
         self.name: Optional[str] = name if name else "Title of the proposal (max 80 characters)"
         self.description: Optional[str] = "(no description)"
         self.author: Optional[str] = None
@@ -183,6 +186,7 @@ class Proposal:
         return {
             'hash': self.hash,
             'type': self.type,
+            'declaredType': self.declaredType,
             'title': self.name,
             'description': self.description,
             'author': self.author,
