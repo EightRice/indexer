@@ -15,11 +15,8 @@ def initialize(db, web3: Web3, network_config: dict):
     event_sigs = {}
     for sig in EVENT_SIGNATURES:
         name = sig.split("(")[0]
-        h = web3.keccak(text=sig).hex()
-        if not h.startswith("0x"):
-            h = "0x" + h
-        event_sigs[h] = name
-        print(f"[autonet]   {name}: {h[:20]}...")
+        # The main loop matches topics[0].hex(), which has no 0x prefix
+        event_sigs[web3.keccak(text=sig).hex().removeprefix("0x")] = name
     print(f"[autonet] Initialized with {len(event_sigs)} event signatures")
     return {"event_signatures": event_sigs}
 
