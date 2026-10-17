@@ -48,9 +48,12 @@ NETWORKS = {
     },
 }
 
-# Events we mirror. AgentRegistered seeds the agent's identity record;
-# EndpointUpdated refreshes its mutable browser-reachable wss endpoint.
+# Events we mirror. AgentRegistered seeds the agent's identity record,
+# OwnerBound its owner and parent, AgentRevoked marks it and its descendants
+# revoked, and EndpointUpdated refreshes its browser-reachable wss endpoint.
 EVENT_SIGNATURES = [
-    "AgentRegistered(address,bytes32,bytes,uint256)",
+    "AgentRegistered(address,bytes,uint256)",
+    "OwnerBound(address,address,address,address,uint256)",
+    "AgentRevoked(address,address)",
     "EndpointUpdated(address,string)",
 ]
