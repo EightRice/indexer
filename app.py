@@ -324,6 +324,26 @@ for app_name in apps_to_run:
         alert(error_msg)
         sys.exit(1)
 
+# --- Autonet: follow every jurisdiction's Substrate ---
+# Each jurisdiction with the autonet module records its Substrate in the registry; the DAO
+# indexer keeps those maps, so read them once here, and the main loop adds new ones live.
+def add_substrate_paper(address):
+    if address in papers:
+        return
+    from apps.autonet.paper import Paper as AutonetPaper
+    papers[address] = AutonetPaper(address, web3, app_dbs['autonet'],
+                                   app_configs['autonet'].get('agents_collection', 'agents'))
+    if address not in listening_to_addresses:
+        listening_to_addresses.append(address)
+    print(f"[autonet] Following Substrate {address}")
+
+if 'autonet' in apps_to_run and 'homebase' in apps_to_run:
+    try:
+        for substrate in app_modules['autonet']['indexer'].jurisdiction_substrates(app_data['homebase']['daos_collection']):
+            add_substrate_paper(substrate)
+    except Exception as e:
+        print(f"Warning: could not read jurisdiction Substrates: {e}")
+
 # --- Finalize Listener Setup ---
 listening_to_addresses = list(set([addr for addr in listening_to_addresses if addr]))
 print("\n--- Initializing with Monitored Event Signatures ---")
@@ -655,6 +675,8 @@ while True:
                                 network_collection=network_collection,
                             )})
                         print(f"Now listening to {len(listening_to_addresses)} addresses.")
+                    elif item[0] == 'substrate' and 'autonet' in apps_to_run:
+                        add_substrate_paper(item[1])
                     elif item[0] == 'registry' and 'homebase' in apps_to_run:
                         # Registry for Economy DAO description updates
                         registry_address_new = Web3.to_checksum_address(item[1])

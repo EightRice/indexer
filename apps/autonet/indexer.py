@@ -72,6 +72,17 @@ def setup_papers(db, web3: Web3, network_config: dict):
     return {"addresses": [address], "papers": {address: paper}}
 
 
+def jurisdiction_substrates(daos_collection) -> list:
+    """Every indexed jurisdiction's Substrate, from its jurisdiction.autonet.substrate
+    registry entry (the DAO indexer keeps each DAO's registry map)."""
+    out = []
+    for doc in daos_collection.stream():
+        value = ((doc.to_dict() or {}).get("registry") or {}).get("jurisdiction.autonet.substrate", "")
+        if Web3.is_address(value):
+            out.append(Web3.to_checksum_address(value))
+    return out
+
+
 def run_historical_sync(db, web3: Web3, network_config: dict, alert_func):
     """Catch up missed events from the shared checkpoint. The main loop's live
     poller advances lastSyncedBlock; here we backfill from it (or a recent
