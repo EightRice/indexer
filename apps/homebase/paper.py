@@ -13,9 +13,13 @@ from apps.generic.converting import decode_function_parameters
 from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi, mint_function_abi, burn_function_abi
 
 
-ATN_EPOCH_SELECTOR = Web3.keccak(text="anchor(string,bytes32,bytes32,bytes32,string,bytes32,bytes32)")[:4]
-ATN_EPOCH_TYPES = ["string", "bytes32", "bytes32", "bytes32", "string", "bytes32", "bytes32"]
-ATN_EPOCH_FIELDS = ["epochId", "epochRoot", "prevEpochRoot", "prevAnchorHash", "agentMintCid", "payloadHash", "agentMintRoot"]
+ATN_EPOCH_SELECTOR = Web3.keccak(text="anchor(string,bytes32,bytes32,bytes32,string,bytes32,bytes32,uint256)")[:4]
+ATN_EPOCH_TYPES = ["string", "bytes32", "bytes32", "bytes32", "string", "bytes32", "bytes32", "uint256"]
+ATN_EPOCH_FIELDS = ["epochId", "epochRoot", "prevEpochRoot", "prevAnchorHash", "agentMintCid", "payloadHash", "agentMintRoot", "cutoff"]
+# An AnchorElection's proposal for one epoch: a single-choice vote among the anchors its drawn agents register
+ANCHOR_ELECTION_SELECTOR = Web3.keccak(text="anchorWinner(uint256,uint256)")[:4]
+OPTION_SOURCE_ABI = [{"type": "function", "name": "optionSourceOf", "stateMutability": "view",
+                      "inputs": [{"name": "proposalId", "type": "uint256"}], "outputs": [{"name": "", "type": "address"}]}]
 
 
 def _decode_atn_epoch(calldatas):
@@ -31,6 +35,20 @@ def _decode_atn_epoch(calldatas):
     except Exception:
         return None
     return {k: ("0x" + v.hex() if isinstance(v, bytes) else v) for k, v in zip(ATN_EPOCH_FIELDS, values)}
+
+
+def _decode_anchor_election(calldatas):
+    """(epochNumber, attempt) if the proposal is exactly one AnchorElection.anchorWinner call, else None."""
+    if len(calldatas) != 1:
+        return None
+    data = bytes(calldatas[0]) if not isinstance(calldatas[0], str) else bytes.fromhex(calldatas[0].removeprefix("0x"))
+    if data[:4] != ANCHOR_ELECTION_SELECTOR:
+        return None
+    try:
+        from eth_abi import decode
+        return decode(["uint256", "uint256"], data[4:])
+    except Exception:
+        return None
 
 class Paper:
     ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -670,6 +688,22 @@ class Paper:
                     f"Agent mints: {anchor['agentMintCid'] or '(none)'} (root {anchor['agentMintRoot']})\n"
                     f"Payload hash: {anchor['payloadHash']}")
 
+        # An epoch close: the governor counts it as a single-choice election when the target is an
+        # approved option source, and votes are option indexes (tallied in optionVotes)
+        option_source = None
+        election = _decode_anchor_election(calldatas_raw)
+        if election is not None:
+            try:
+                source = self.get_specific_contract(self.address, OPTION_SOURCE_ABI).functions.optionSourceOf(proposal_id_raw).call()
+                if int(source, 16) != 0:
+                    option_source = Web3.to_checksum_address(source)
+            except Exception as e:
+                print(f"Could not read the option source of proposal {proposal_id}: {e}")
+            type_ = "atn epoch"
+            name = f"ATN epoch {election[0]} close"
+            desc = (f"Elects the anchor of Autonet epoch {election[0]} (attempt {election[1]}) among the options "
+                    f"registered by drawn agents. The winning option is anchored on the Substrate when this executes.")
+
         p = Proposal(name=name, org=self.dao)
         p.author = proposer
         p.id = proposal_id
@@ -701,8 +735,13 @@ class Paper:
             print(f"Warning: Token paper or token address not set for DAO {self.dao}. Proposal {proposal_id} will have totalSupply of '0'.")
 
         proposal_doc_ref = self.daos_collection.document(self.dao).collection('proposals').document(proposal_id)
+        doc = p.toJson()
+        if election is not None:
+            doc.update({'epochNumber': int(election[0]), 'attempt': int(election[1])})
+        if option_source:
+            doc.update({'optionSource': option_source, 'optionVotes': {}, 'votesCast': 0})
         try:
-            proposal_doc_ref.set(p.toJson())
+            proposal_doc_ref.set(doc)
 
             member_doc_ref = self.daos_collection.document(self.dao).collection('members').document(proposer)
             if member_doc_ref.get().exists:
@@ -801,7 +840,14 @@ class Paper:
             current_votes_for = prop_data.get('votesFor', 0)
             current_votes_against = prop_data.get('votesAgainst', 0)
 
-            if support_val == 1:
+            if prop_data.get('optionSource'):
+                tallies = prop_data.get('optionVotes') or {}
+                key = str(support_val)
+                transaction.update(proposal_ref, {
+                    f'optionVotes.{key}': str(int(tallies.get(key, "0")) + weight_val),
+                    'votesCast': prop_data.get('votesCast', 0) + 1
+                })
+            elif support_val == 1:
                 new_in_favor = current_in_favor + weight_val
                 transaction.update(proposal_ref, {
                     'inFavor': str(new_in_favor),
