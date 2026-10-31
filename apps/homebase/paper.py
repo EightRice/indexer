@@ -69,6 +69,20 @@ def _decode_appeal(targets, calldatas):
         return None
     return {"project": Web3.to_checksum_address(targets[0]), "percent": int(percent), "ruling": ruling}
 
+
+# A project veto: the DAO closes one of its Economy's projects, refunding every backer
+DAO_VETO_SELECTOR = Web3.keccak(text="daoVeto()")[:4]
+
+
+def _decode_veto(targets, calldatas):
+    """The vetoed project's address if the proposal is exactly one daoVeto call, else None."""
+    if len(calldatas) != 1:
+        return None
+    data = bytes(calldatas[0]) if not isinstance(calldatas[0], str) else bytes.fromhex(calldatas[0].removeprefix("0x"))
+    if data[:4] != DAO_VETO_SELECTOR:
+        return None
+    return Web3.to_checksum_address(targets[0])
+
 class Paper:
     ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
     def __init__(self, address, kind, web3, daos_collection, db, dao=None, token=None):
@@ -689,6 +703,15 @@ class Paper:
                 desc = (f"Overrules the arbitration of project {appeal['project']}: {appeal['percent']}% of the "
                         f"funds to the contractor.\n\n{appeal['ruling']}")
 
+        # Likewise vetoes, typed "veto"
+        veto_project = _decode_veto(targets, calldatas_raw)
+        if veto_project is not None:
+            type_ = "veto"
+            if len(parts) < 4:
+                name = f"Veto: project {veto_project}"
+                desc = (f"Closes project {veto_project}; every backer gets their contribution back.\n\n"
+                        f"{description_full}")
+
         p = Proposal(name=name, org=self.dao)
         p.author = proposer
         p.id = proposal_id
@@ -727,6 +750,8 @@ class Paper:
             doc.update({'optionSource': option_source, 'optionVotes': {}, 'votesCast': 0})
         if appeal is not None:
             doc.update({'appealProject': appeal['project'].lower(), 'appealPercent': appeal['percent']})
+        if veto_project is not None:
+            doc.update({'vetoProject': veto_project.lower()})
         try:
             proposal_doc_ref.set(doc)
 
