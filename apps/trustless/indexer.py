@@ -16,7 +16,7 @@ from apps.trustless.config import (
     EVENT_SIGNATURES,
     CHECKPOINT_FIELD,
 )
-from apps.trustless.paper import Paper
+from apps.trustless.paper import Paper, DAO_LINK_FIELDS
 
 STAGE_MAP = {
     0: 'open', 1: 'pending', 2: 'ongoing', 3: 'dispute',
@@ -57,7 +57,7 @@ def _discover(db, daos_collection: str):
     """
     Economies, from the DAO docs' `economy` field: {economy: dao}.
     Projects, from every projects subcollection under this network's DAOs:
-    {project: (economy, dao, appealProposalId)}. A project stays followed after its Economy is
+    {project: (economy, dao, {kind: linked proposal id})}. A project stays followed after its Economy is
     detached from the DAO, since it keeps running.
     """
     economies = {}
@@ -75,7 +75,8 @@ def _discover(db, daos_collection: str):
         data = project_doc.to_dict() or {}
         project, dao, economy = _checksum(project_doc.id), _checksum(dao_ref.id), _checksum(data.get('economyAddress', ''))
         if project and dao and economy:
-            projects[project] = (economy, dao, data.get('appealProposalId'))
+            links = {kind: int(data[field]) for kind, field in DAO_LINK_FIELDS.items() if data.get(field)}
+            projects[project] = (economy, dao, links)
     return economies, projects
 
 
@@ -84,11 +85,10 @@ def _papers(db, web3, daos_collection, economies, projects):
     for economy, dao in economies.items():
         papers[economy] = Paper(address=economy, kind='economy', web3=web3, db=db,
                                 daos_collection=daos_collection, dao_address=dao)
-    for project, (economy, dao, appeal_id) in projects.items():
+    for project, (economy, dao, links) in projects.items():
         paper = Paper(address=project, kind='project', web3=web3, db=db,
                       daos_collection=daos_collection, dao_address=dao, economy_address=economy)
-        if appeal_id:
-            paper.appeal_proposal_id = int(appeal_id)
+        paper.dao_links = dict(links)
         papers[project] = paper
     return papers
 
@@ -250,14 +250,13 @@ def setup_papers(db, web3: Web3, network_config: dict):
 
 
 def check_appeals(papers: dict, web3: Web3):
-    """Clears appeal links whose DAO proposal ended without executing (see Paper.check_appeal)."""
-    pending = [p for p in papers.values()
-               if isinstance(p, Paper) and p.kind == 'project' and p.appeal_proposal_id is not None]
+    """Clears appeal and veto links whose DAO proposal ended without executing (see Paper.check_links)."""
+    pending = [p for p in papers.values() if isinstance(p, Paper) and p.kind == 'project' and p.dao_links]
     if not pending:
         return
     now = web3.eth.get_block('latest')['timestamp']
     for paper in pending:
         try:
-            paper.check_appeal(now)
+            paper.check_links(now)
         except Exception as e:
-            print(f"[trustless] Could not check the appeal on {paper.address}: {e}")
+            print(f"[trustless] Could not check the DAO proposals on {paper.address}: {e}")

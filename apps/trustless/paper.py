@@ -10,6 +10,8 @@ from apps.trustless.entities import Project, Transaction, Stage, ZERO_ADDRESS
 
 # Governor ProposalState values (OpenZeppelin)
 PENDING, ACTIVE, CANCELED, DEFEATED, SUCCEEDED, QUEUED, EXPIRED, EXECUTED = range(8)
+# The DAO proposals a project doc links while they may still pass: kind -> field
+DAO_LINK_FIELDS = {'appeal': 'appealProposalId', 'veto': 'vetoProposalId'}
 # DaoProposalHold.GRACE: a passed proposal holds this long after its deadline (or eta, once queued)
 HOLD_GRACE = 86400
 GOVERNOR_STATE_ABI = json.loads('''[
@@ -41,9 +43,10 @@ class Paper:
         self.dao_address = Web3.to_checksum_address(dao_address)  # homebase DAO doc IDs are checksummed
         self.economy_address = economy_address  # For projects, which economy they belong to
         self.contract = None
-        # A DAO proposal overruling this project's arbiter, while it may still pass (see check_appeal)
-        self.appeal_proposal_id = None
-        self.appeal_governor = None
+        # DAO proposals that overrule (appeal) or veto this project, while they may still pass
+        # (see check_links): kind -> proposal id
+        self.dao_links = {}
+        self.dao_governor = None
 
         # Set ABI based on kind
         if kind == "economy":
@@ -422,22 +425,22 @@ class Paper:
 
         print(f"[trustless] ArbitrationDecision: {args['percent']}% -> appealable")
 
-    def handle_appeal_proposal(self, log, proposal_id: int):
-        """A DAO proposal that calls daoOverrule on this project was created: the appeal is underway.
-        Display only; the project's appeal window is long enough for the proposal to finish."""
+    def handle_dao_proposal(self, log, proposal_id: int, kind: str):
+        """A DAO proposal that calls daoOverrule (kind 'appeal') or daoVeto (kind 'veto') on this
+        project was created: the project doc links it while it may still pass (see check_links)."""
         read = self.web3.eth.contract(address=self.address, abi=json.loads(projectReadAbi))
         governor = read.functions.daoGovernor().call()
         if Web3.to_checksum_address(governor) != Web3.to_checksum_address(log['address']):
-            print(f"[trustless] Ignoring overrule proposal from a different governor for {self.address}")
+            print(f"[trustless] Ignoring {kind} proposal from a different governor for {self.address}")
             return
-        self._get_project_ref().update({'appealProposalId': str(proposal_id)})
-        self.appeal_proposal_id = int(proposal_id)
-        self.appeal_governor = Web3.to_checksum_address(governor)
-        self._record_transaction(log, "appeal", {
+        self._get_project_ref().update({DAO_LINK_FIELDS[kind]: str(proposal_id)})
+        self.dao_links[kind] = int(proposal_id)
+        self.dao_governor = Web3.to_checksum_address(governor)
+        self._record_transaction(log, kind, {
             "proposer": self._get_tx_sender(log),
             "proposalId": str(proposal_id),
         })
-        print(f"[trustless] Appeal underway: proposal {proposal_id}")
+        print(f"[trustless] {kind.capitalize()} underway: proposal {proposal_id}")
 
     def handle_arbitration_finalized(self, log):
         """Handle ArbitrationFinalized - stage becomes closed"""
@@ -619,35 +622,35 @@ class Paper:
         vote_type = "dispute" if for_dispute else "release"
         print(f"[trustless] BackerVoteCast: {voter[:10]}... voted for {vote_type} with {voting_power} power")
 
-    # ============ Appeal tracking ============
+    # ============ DAO proposal links ============
 
-    def check_appeal(self, now: int):
-        """Clears the project's appealProposalId once its appeal can no longer pass: canceled,
-        defeated, expired, or past the hold grace without being queued or executed (the rule
-        DaoProposalHold.isLive applies on-chain), so the app offers Appeal and Escalate again.
-        An executed overrule closes the project, so its link stays. Returns True while still live."""
-        if self.appeal_proposal_id is None:
-            return False
-        if self.appeal_governor is None:  # loaded from Firestore at startup
-            read = self.web3.eth.contract(address=self.address, abi=json.loads(projectReadAbi))
-            self.appeal_governor = Web3.to_checksum_address(read.functions.daoGovernor().call())
-        governor = self.web3.eth.contract(address=self.appeal_governor, abi=GOVERNOR_STATE_ABI)
-        pid = self.appeal_proposal_id
-        state = governor.functions.state(pid).call()
-        if state == EXECUTED:
-            self.appeal_proposal_id = None
-            return False
-        if state in (PENDING, ACTIVE):
-            return True
-        if state == SUCCEEDED and now <= governor.functions.proposalDeadline(pid).call() + HOLD_GRACE:
-            return True
-        if state == QUEUED and now <= governor.functions.proposalEta(pid).call() + HOLD_GRACE:
-            return True
-        ref = self._get_project_ref()
-        snap = ref.get()
-        # A later appeal may have replaced it already
-        if snap.exists and str((snap.to_dict() or {}).get('appealProposalId')) == str(pid):
-            ref.update({'appealProposalId': None})
-            print(f"[trustless] Appeal proposal {pid} on {self.address} ended without executing (state {state}); link cleared")
-        self.appeal_proposal_id = None
-        return False
+    def check_links(self, now: int):
+        """Clears each linked DAO proposal (appealProposalId, vetoProposalId) once it can no longer
+        pass: canceled, defeated, expired, or past the hold grace without being queued or executed
+        (the rule DaoProposalHold.isLive applies on-chain), so the app offers Appeal, Escalate or a
+        new veto again. An executed overrule or veto closes the project, so its link stays."""
+        for kind, field in list(DAO_LINK_FIELDS.items()):
+            pid = self.dao_links.get(kind)
+            if pid is None:
+                continue
+            if self.dao_governor is None:  # links loaded from Firestore at startup
+                read = self.web3.eth.contract(address=self.address, abi=json.loads(projectReadAbi))
+                self.dao_governor = Web3.to_checksum_address(read.functions.daoGovernor().call())
+            governor = self.web3.eth.contract(address=self.dao_governor, abi=GOVERNOR_STATE_ABI)
+            state = governor.functions.state(pid).call()
+            if state == EXECUTED:
+                del self.dao_links[kind]
+                continue
+            if state in (PENDING, ACTIVE):
+                continue
+            if state == SUCCEEDED and now <= governor.functions.proposalDeadline(pid).call() + HOLD_GRACE:
+                continue
+            if state == QUEUED and now <= governor.functions.proposalEta(pid).call() + HOLD_GRACE:
+                continue
+            ref = self._get_project_ref()
+            snap = ref.get()
+            # A later proposal of the same kind may have replaced it already
+            if snap.exists and str((snap.to_dict() or {}).get(field)) == str(pid):
+                ref.update({field: None})
+                print(f"[trustless] {kind} proposal {pid} on {self.address} ended without executing (state {state}); link cleared")
+            del self.dao_links[kind]

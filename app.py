@@ -496,8 +496,8 @@ def register_on_project(project, targets, values, calldatas, description):
     print(f"[trustless] Registered DAO proposal on {project}: status {receipt.status}, tx {tx_hash.hex()}")
 
 def notify_appeal_proposals(log_entry, papers):
-    """A DAO proposal that calls daoVeto or daoOverrule on a trustless project: an overrule is that
-    project's appeal (shown on the project), and either is registered on the project so it holds."""
+    """A DAO proposal that calls daoVeto or daoOverrule on a trustless project: the project links it
+    (an overrule is its appeal, a veto its veto), and either is registered on the project so it holds."""
     try:
         from eth_abi import decode
         proposal_id, _, targets, values, _, calldatas, _, _, description = decode(PROPOSAL_CREATED_TYPES, bytes(log_entry["data"]))
@@ -508,7 +508,9 @@ def notify_appeal_proposals(log_entry, papers):
             if getattr(paper, "kind", None) != "project":
                 continue
             if calldata[:4] == DAO_OVERRULE_SELECTOR:
-                paper.handle_appeal_proposal(log_entry, proposal_id)
+                paper.handle_dao_proposal(log_entry, proposal_id, 'appeal')
+            elif calldata[:4] == DAO_VETO_SELECTOR:
+                paper.handle_dao_proposal(log_entry, proposal_id, 'veto')
             if calldata[:4] in (DAO_OVERRULE_SELECTOR, DAO_VETO_SELECTOR) and address not in projects:
                 projects.append(address)
         if relayer_key:
@@ -758,7 +760,7 @@ while True:
         # IMPORTANT: Update our checkpoint after a successful run
         last_processed_block = to_block
 
-        # Governors emit nothing when a proposal is defeated or lapses, so appeal proposals are polled
+        # Governors emit nothing when a proposal is defeated or lapses, so appeal and veto proposals are polled
         if 'trustless' in apps_to_run and current_role != 'secondary' and time.time() - last_appeal_check >= APPEAL_CHECK_SECONDS:
             last_appeal_check = time.time()
             app_modules['trustless']['indexer'].check_appeals(papers, web3)

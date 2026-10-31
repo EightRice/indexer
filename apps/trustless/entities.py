@@ -42,6 +42,7 @@ class Project:
     disputeResolution: Optional[int] = None  # Percent 0-100
     rulingHash: str = ""
     appealProposalId: Optional[str] = None
+    vetoProposalId: Optional[str] = None
 
     def to_firestore(self) -> dict:
         """Convert to Firestore document format"""
@@ -66,6 +67,7 @@ class Project:
             "disputeResolution": self.disputeResolution,
             "rulingHash": self.rulingHash,
             "appealProposalId": self.appealProposalId,
+            "vetoProposalId": self.vetoProposalId,
         }
 
     @classmethod
@@ -92,6 +94,7 @@ class Project:
             disputeResolution=doc_dict.get("disputeResolution"),
             rulingHash=doc_dict.get("rulingHash", ""),
             appealProposalId=doc_dict.get("appealProposalId"),
+            vetoProposalId=doc_dict.get("vetoProposalId"),
         )
 
 
