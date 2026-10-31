@@ -100,11 +100,16 @@ elif args.network == 'testnet':
 elif args.network == 'shadownet':
     default_rpc = "https://node.shadownet.etherlink.com"
 elif args.network == 'localhost':
-    default_rpc = "http://127.0.0.1:8545"  # Hardhat node
+    default_rpc = os.getenv("LOCAL_RPC_URL") or "http://127.0.0.1:8545"  # Hardhat node; the e2e harness points it elsewhere
     # Set Firestore emulator host for localhost (matches Flutter apps' local test mode). The e2e
     # harness may point a second instance at another emulator; it can never be unset here.
     os.environ["FIRESTORE_EMULATOR_HOST"] = os.getenv("LOCAL_FIRESTORE_EMULATOR_HOST") or "127.0.0.1:8080"
     print(f"Using Firestore emulator at {os.environ['FIRESTORE_EMULATOR_HOST']}")
+    # An e2e instance must never touch the owner's local stack (hardhat 8545, emulator 8080)
+    if (args.instance_id or "").startswith("indexer-e2e") and (
+            default_rpc.rstrip("/").endswith(":8545") or os.environ["FIRESTORE_EMULATOR_HOST"].endswith(":8080"))             and os.getenv("E2E_ALLOW_MAIN_STACK") != "1":
+        print("FATAL: e2e indexer pointed at the main local stack (8545/8080); set LOCAL_RPC_URL and LOCAL_FIRESTORE_EMULATOR_HOST")
+        sys.exit(2)
 elif args.network == 'base-sepolia':
     default_rpc = "https://base-sepolia-rpc.publicnode.com"
 else:
