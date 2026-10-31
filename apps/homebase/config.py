@@ -43,6 +43,7 @@ EVENT_SIGNATURES = [
     "ProposalQueued(uint256,uint256)",
     "ProposalExecuted(uint256)",
     "VoteCast(address,uint256,uint8,uint256,string)",
+    "SupermajoritySet(uint256,uint256)",  # Governor: the threshold for constitutional proposals
     "RegistryUpdated(string,string)",  # Registry: key, value - for Economy DAO descriptions
     # Debates (contracts/debates): the factory's new debates, then each debate's arguments
     "DebateCreated(address,address,address,string,uint256)",

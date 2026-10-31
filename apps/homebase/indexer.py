@@ -267,6 +267,8 @@ def run_historical_sync(db, web3, network_config, alert_func):
                     web3=web3,
                     dao=dao_address
                 )
+                # The DAO's supermajority threshold, which the DAO scan below doesn't replay
+                dao_paper.refresh_supermajority()
 
                 dao_contract = dao_paper.get_contract()
                 token_contract = token_paper.get_contract()

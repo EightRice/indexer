@@ -19,6 +19,14 @@ ATN_EPOCH_TYPES = ["string", "bytes32", "bytes32", "bytes32", "string", "bytes32
 ATN_EPOCH_FIELDS = ["epochId", "epochRoot", "prevEpochRoot", "prevAnchorHash", "agentMintCid", "payloadHash", "agentMintRoot", "cutoff"]
 # An AnchorElection's proposal for one epoch: a single-choice vote among the anchors its drawn agents register
 ANCHOR_ELECTION_SELECTOR = Web3.keccak(text="anchorWinner(uint256,uint256)")[:4]
+# Constitutional proposals (trustless-contracts docs/governance.md): the DAO's threshold, and the one
+# each protected proposal got when it was proposed (0 for ordinary proposals). Absent on older governors.
+SUPERMAJORITY_ABI = [
+    {"type": "function", "name": "supermajorityBps", "stateMutability": "view", "inputs": [],
+     "outputs": [{"name": "", "type": "uint256"}]},
+    {"type": "function", "name": "proposalSupermajority", "stateMutability": "view",
+     "inputs": [{"name": "proposalId", "type": "uint256"}], "outputs": [{"name": "", "type": "uint256"}]},
+]
 OPTION_SOURCE_ABI = [{"type": "function", "name": "optionSourceOf", "stateMutability": "view",
                       "inputs": [{"name": "proposalId", "type": "uint256"}], "outputs": [{"name": "", "type": "address"}]}]
 
@@ -147,6 +155,41 @@ class Paper:
             return (snap.to_dict() or {}).get('title') or f"proposal {proposal_id[:8]}" if snap.exists else f"proposal {proposal_id[:8]}"
         except Exception:
             return f"proposal {proposal_id[:8]}"
+
+    def _supermajority(self, governor, proposal_id=None):
+        """The governor's threshold, or a proposal's (0 if unprotected); None if the governor predates them"""
+        try:
+            c = self.get_specific_contract(governor, SUPERMAJORITY_ABI)
+            fn = c.functions.supermajorityBps() if proposal_id is None else c.functions.proposalSupermajority(proposal_id)
+            return int(fn.call())
+        except Exception:
+            return None
+
+    def refresh_supermajority(self, dao=None):
+        """Records the DAO's supermajority threshold on its document"""
+        dao = dao or self.dao
+        bps = self._supermajority(dao)
+        if bps is None:
+            return
+        try:
+            self.daos_collection.document(dao).update({'supermajorityBps': bps})
+        except NotFound:
+            pass
+        except Exception as e:
+            print(f"Could not record the supermajority of DAO {dao}: {e}")
+
+    def supermajority_set(self, log):
+        """SupermajoritySet(oldBps, newBps): the DAO changed its threshold (or set it at creation)"""
+        from eth_abi import decode
+        old, new = decode(['uint256', 'uint256'], bytes(log['data']))
+        try:
+            self.daos_collection.document(self.dao).update({'supermajorityBps': int(new)})
+        except NotFound:
+            pass  # set at creation, before NewDaoCreated: add_dao reads it
+        if old:
+            self._activity(log, 'supermajoritySet',
+                           f"Changed the supermajority from {old / 100:g}% to {new / 100:g}%")
+        return None
 
     def _token_units(self):
         """(decimals, symbol) of the DAO's token, read once"""
@@ -356,6 +399,7 @@ class Paper:
             print(f"Error committing batch for DAO {org.name}: {e}")
 
         self._activity(log, 'daoCreated', f"Created {org.name}", dao=org.address)
+        self.refresh_supermajority(org.address)
         return [org.address, org.govTokenAddress, org.registryAddress]
 
 
@@ -484,6 +528,7 @@ class Paper:
         self.daos_collection.document(org.address).set(dao_json)
         print(f"Successfully added DAO (wrapped) {org.name} / {org.address} to Firestore.")
         self._activity(log, 'daoCreated', f"Created {org.name}", dao=org.address)
+        self.refresh_supermajority(org.address)
         return [org.address, org.govTokenAddress, org.registryAddress]
 
 
@@ -773,6 +818,10 @@ class Paper:
             doc.update({'epochNumber': int(election[0]), 'attempt': int(election[1])})
         if option_source:
             doc.update({'optionSource': option_source, 'optionVotes': {}, 'votesCast': 0})
+        # A constitutional proposal: the share of For+Against it needs, fixed when it was proposed
+        supermajority = self._supermajority(self.address, proposal_id_raw)
+        if supermajority:
+            doc['supermajorityBps'] = supermajority
         if appeal is not None:
             doc.update({'appealProject': appeal['project'].lower(), 'appealPercent': appeal['percent']})
         if veto_project is not None:
@@ -1428,6 +1477,8 @@ class Paper:
                 self.execute(log)
             elif func == "ProposalCanceled":
                 self.cancel(log)
+            elif func == "SupermajoritySet":
+                self.supermajority_set(log)
         elif self.kind == "registry":
             if func == "RegistryUpdated":
                 return self.registry_updated(log)
