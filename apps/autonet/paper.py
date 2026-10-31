@@ -3,6 +3,8 @@
 from web3 import Web3
 from google.cloud import firestore
 
+from activity import record_activity, short
+
 
 def _as_bytes(value) -> bytes:
     """Normalise a web3 log field (HexBytes / hex str) to raw bytes."""
@@ -33,12 +35,19 @@ class Paper:
       - EndpointUpdated  -> mutable wss endpoint (merge; '' clears it)
     """
 
-    def __init__(self, address: str, web3: Web3, db, agents_collection: str):
+    def __init__(self, address: str, web3: Web3, db, agents_collection: str, dao_ref=None):
         self.address = Web3.to_checksum_address(address)
         self.web3 = web3
         self.db = db
         self.agents_collection = agents_collection
         self.chain_id = int(web3.eth.chain_id)
+        # A jurisdiction's Substrate: its agent events also go to the DAO's activity feed
+        self.dao_ref = dao_ref
+
+    def _activity(self, log, type_, summary, agent):
+        if self.dao_ref is not None:
+            record_activity(self.dao_ref, self.web3, log, type_, summary,
+                            target_kind='agent', target_id=agent, target_label=short(agent))
 
     def handle_event(self, log, func=None):
         """Dispatch a matched log. Returns None (autonet adds no new contracts
@@ -75,15 +84,18 @@ class Paper:
             "transactionHash": _as_hex(log["transactionHash"]),
         })
         print(f"[autonet] registered {agent} (block {int(log['blockNumber'])})")
+        self._activity(log, 'agentRegistered', f"Agent {short(agent)} registered", agent)
 
     def _handle_owner_bound(self, log) -> None:
         agent = self._agent_from_topic(log)
+        owner = self._agent_from_topic(log, 2)
         self._write(agent, {
             "address": agent,
-            "owner": self._agent_from_topic(log, 2),
+            "owner": owner,
             "parent": self._agent_from_topic(log, 3),
             "ownerBlock": int(log["blockNumber"]),
         })
+        self._activity(log, 'agentBound', f"Agent {short(agent)} bound to owner {short(owner)}", agent)
 
     def _handle_revoked(self, log) -> None:
         # The Substrate revokes the agent's whole subtree implicitly, through the
@@ -102,6 +114,9 @@ class Paper:
                         .where("parent", "==", agent).stream())
             todo += [c.to_dict()["address"] for c in children]
         print(f"[autonet] revoked {len(seen)} agent(s) from {self._agent_from_topic(log)} (block {block})")
+        root = self._agent_from_topic(log)
+        more = f" and {len(seen) - 1} descendant(s)" if len(seen) > 1 else ""
+        self._activity(log, 'agentRevoked', f"Agent {short(root)}{more} revoked", root)
 
     def _handle_endpoint(self, log) -> None:
         agent = self._agent_from_topic(log)
@@ -112,6 +127,8 @@ class Paper:
             "wsEndpoint": ws_endpoint,
             "endpointBlock": int(log["blockNumber"]),
         })
+        self._activity(log, 'agentEndpoint',
+                       f"Agent {short(agent)} {'set its endpoint' if ws_endpoint else 'cleared its endpoint'}", agent)
         print(f"[autonet] endpoint {agent} -> "
               f"{ws_endpoint or '(cleared)'} (block {int(log['blockNumber'])})")
 

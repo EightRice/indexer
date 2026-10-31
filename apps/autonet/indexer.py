@@ -70,13 +70,13 @@ def setup_papers(db, web3: Web3, network_config: dict):
 
 
 def jurisdiction_substrates(daos_collection) -> list:
-    """Every indexed jurisdiction's Substrate, from its jurisdiction.autonet.substrate
-    registry entry (the DAO indexer keeps each DAO's registry map)."""
+    """Every indexed jurisdiction's Substrate with its DAO, (substrate, dao doc id), from its
+    jurisdiction.autonet.substrate registry entry (the DAO indexer keeps each DAO's registry map)."""
     out = []
     for doc in daos_collection.stream():
         value = ((doc.to_dict() or {}).get("registry") or {}).get("jurisdiction.autonet.substrate", "")
         if Web3.is_address(value):
-            out.append(Web3.to_checksum_address(value))
+            out.append((Web3.to_checksum_address(value), doc.id))
     return out
 
 

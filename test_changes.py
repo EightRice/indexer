@@ -56,6 +56,10 @@ def test_imports():
         ("apps.homebase.indexer", "Homebase indexer"),
         ("apps.homebase.paper", "Homebase paper"),
         ("apps.homebase.config", "Homebase config"),
+        ("apps.trustless.paper", "Trustless paper"),
+        ("apps.trustless.indexer", "Trustless indexer"),
+        ("apps.autonet.paper", "Autonet paper"),
+        ("activity", "Activity feed"),
     ]
 
     passed = 0
@@ -84,6 +88,67 @@ def test_imports():
     return failed == 0
 
 
+def test_activity_feed():
+    """The activity feed's helpers: document ids match per-project activity, amounts read in whole units"""
+    from activity import doc_id, format_units, short, record_activity
+
+    class FakeHash(bytes):
+        def hex(self):
+            return "ab" * 32
+
+    log = {'transactionHash': FakeHash(b''), 'logIndex': 3, 'blockNumber': 7}
+    checks = [
+        (doc_id(log), "ab" * 32 + "_3"),
+        (format_units(1500 * 10**18, 18), "1,500"),
+        (format_units(15 * 10**17, 18), "1.5"),
+        (format_units(123456789, 6), "123.456789"),
+        (format_units(5, 0), "5"),
+        (short("0x" + "1" * 40), "0x1111...1111"),
+    ]
+
+    # record_activity writes one doc under activity/{id}, with the 0x-prefixed tx hash and block time
+    written = {}
+
+    class Ref:
+        def __init__(self, path):
+            self.path = path
+            self.id = path.split('/')[-1]
+
+        def collection(self, name):
+            return Ref(f"{self.path}/{name}")
+
+        def document(self, name):
+            return Ref(f"{self.path}/{name}")
+
+        def set(self, data):
+            written[self.path] = data
+
+    class Eth:
+        def get_block(self, n):
+            return {'timestamp': 1_700_000_000}
+
+        def get_transaction(self, h):
+            return {'from': '0xABCDEF0000000000000000000000000000000001'}
+
+    class Web3Fake:
+        eth = Eth()
+
+    record_activity(Ref("idaosX/0xDao"), Web3Fake(), log, 'vote', 'Voted For on P', target_kind='proposal', target_id=12)
+    entry = written.get("idaosX/0xDao/activity/" + "ab" * 32 + "_3", {})
+    checks += [
+        (entry.get('txHash'), "0x" + "ab" * 32),
+        (entry.get('actor'), "0xabcdef0000000000000000000000000000000001"),
+        (entry.get('targetId'), "12"),
+        (entry.get('type'), "vote"),
+    ]
+    failed = [(got, want) for got, want in checks if got != want]
+    for got, want in failed:
+        print(f"  FAIL: got {got!r}, expected {want!r}")
+    if not failed:
+        print(f"  PASS: {len(checks)} activity checks")
+    return not failed
+
+
 def main():
     print("=" * 60)
     print("  INDEXER SANITY TESTS")
@@ -99,6 +164,11 @@ def main():
     print("\n[2] Module Imports")
     print("-" * 40)
     if not test_imports():
+        all_passed = False
+
+    print("\n[3] Activity Feed")
+    print("-" * 40)
+    if not test_activity_feed():
         all_passed = False
 
     print("\n" + "=" * 60)

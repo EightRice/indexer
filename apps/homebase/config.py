@@ -44,4 +44,11 @@ EVENT_SIGNATURES = [
     "ProposalExecuted(uint256)",
     "VoteCast(address,uint256,uint8,uint256,string)",
     "RegistryUpdated(string,string)",  # Registry: key, value - for Economy DAO descriptions
+    # Debates (contracts/debates): the factory's new debates, then each debate's arguments
+    "DebateCreated(address,address,address,string,uint256)",
+    "ArgumentAdded(uint256,uint256,uint8,address,uint256,string)",
+    "WeightAdded(uint256,address,uint256)",
+    "DebateClosed()",
 ]
+
+DEBATE_EVENTS = ["DebateCreated", "ArgumentAdded", "WeightAdded", "DebateClosed"]

@@ -7,6 +7,19 @@ from web3 import Web3
 
 from apps.trustless.abis import economyAbi, projectAbi, projectReadAbi
 from apps.trustless.entities import Project, Transaction, Stage, ZERO_ADDRESS
+from activity import record_activity
+
+# How a project event reads in the DAO's activity feed, before the project's name
+FEED_PHRASES = {
+    'createProject': 'Created the project', 'setParties': 'Named the parties of',
+    'sendFunds': 'Funded', 'sendFundsWithImmediate': 'Funded', 'immediateFundsReleased': 'Released funds at signing on',
+    'signContract': 'Signed', 'voteToRelease': 'Voted to release', 'voteToDispute': 'Voted to dispute',
+    'projectDisputed': 'Disputed', 'projectClosed': 'Closed', 'arbitrate': 'Ruled on',
+    'finalizeArbitration': 'Finalized the ruling on', 'daoOverruled': 'Overruled the arbiter of',
+    'withdrawAsContractor': 'Was paid for', 'withdrawAsContributor': 'Withdrew their backing from',
+    'authorPaid': 'Paid the author of', 'vetoedByDao': 'Vetoed', 'reclaimArbitrationStake': 'Reclaimed the stake on',
+    'sweepOrphanedTokens': 'Swept stray tokens from',
+}
 
 # Governor ProposalState values (OpenZeppelin)
 PENDING, ACTIVE, CANCELED, DEFEATED, SUCCEEDED, QUEUED, EXPIRED, EXECUTED = range(8)
@@ -140,6 +153,21 @@ class Paper:
         doc_id = f"{tx_hash}_{log_index}"
         self._get_project_ref(project).collection("activity").document(doc_id).set(tx.to_firestore())
         print(f"[trustless] Recorded transaction: {function_name} - {tx_hash[:10]}...")
+
+        # Also the DAO's activity feed. Appeals and vetoes are proposals there, recorded by the DAO indexer.
+        if function_name not in ('appeal', 'veto'):
+            name = (params or {}).get('name') if function_name == 'createProject' else self._project_name(project)
+            record_activity(self.db.collection(self.daos_collection).document(self.dao_address), self.web3, log,
+                            function_name, f"{FEED_PHRASES.get(function_name, function_name)} {name}".strip(),
+                            actor=tx.sender, target_kind='project', target_id=project.lower(), target_label=name)
+
+    def _project_name(self, project):
+        if not hasattr(self, '_names'):
+            self._names = {}
+        if project not in self._names:
+            snap = self._get_project_ref(project).get()
+            self._names[project] = (snap.to_dict() or {}).get('name', '') if snap.exists else ''
+        return self._names[project]
 
     def _get_tx_sender(self, log) -> str:
         """Get the sender address from a transaction"""

@@ -1,6 +1,7 @@
 # apps/homebase/paper.py
 
 from apps.homebase.abis import wrapperAbi, daoAbiGlobal, tokenAbiGlobal, wrapper_token_abi, timelock_min_delay_abi, wrapper_w_abi, trustless_wrapper_abi, registryAbi
+from activity import record_activity, format_units, short
 from datetime import datetime, timezone, timedelta
 from apps.homebase.entities import ProposalStatus, Proposal, StateInContract, Txaction, Token, Member, Org, Vote
 import re
@@ -134,6 +135,25 @@ class Paper:
                 print(f"Error creating contract object for {self.address} with kind {self.kind}: {e}")
                 return None
         return self.contract
+
+    # ---- Activity feed (see activity.py) ----
+
+    def _activity(self, log, type_, summary, dao=None, **kw):
+        record_activity(self.daos_collection.document(dao or self.dao), self.web3, log, type_, summary, **kw)
+
+    def _proposal_title(self, proposal_id):
+        try:
+            snap = self.daos_collection.document(self.dao).collection('proposals').document(proposal_id).get()
+            return (snap.to_dict() or {}).get('title') or f"proposal {proposal_id[:8]}" if snap.exists else f"proposal {proposal_id[:8]}"
+        except Exception:
+            return f"proposal {proposal_id[:8]}"
+
+    def _token_units(self):
+        """(decimals, symbol) of the DAO's token, read once"""
+        if not hasattr(self, '_units'):
+            data = self.daos_collection.document(self.dao).get().to_dict() or {}
+            self._units = (int(data.get('decimals') or 18), data.get('symbol') or '')
+        return self._units
 
     def _block_time(self, log):
         """When the event happened on-chain (not when it was indexed, which differs on replays and catch-up)."""
@@ -335,6 +355,7 @@ class Paper:
         except Exception as e:
             print(f"Error committing batch for DAO {org.name}: {e}")
 
+        self._activity(log, 'daoCreated', f"Created {org.name}", dao=org.address)
         return [org.address, org.govTokenAddress, org.registryAddress]
 
 
@@ -462,6 +483,7 @@ class Paper:
         print(f"[DEBUG] DAO toJson economy field: {dao_json.get('economy')}")
         self.daos_collection.document(org.address).set(dao_json)
         print(f"Successfully added DAO (wrapped) {org.name} / {org.address} to Firestore.")
+        self._activity(log, 'daoCreated', f"Created {org.name}", dao=org.address)
         return [org.address, org.govTokenAddress, org.registryAddress]
 
 
@@ -612,6 +634,9 @@ class Paper:
             batch.commit()
         except Exception as e:
             print(f"Error committing batch for delegation in DAO {self.dao}: {e}")
+        summary = "Delegated to themselves" if to_delegate == delegator else (
+            "Removed their delegation" if to_delegate == self.ZERO_ADDRESS else f"Delegated to {short(to_delegate)}")
+        self._activity(log, 'delegate', summary, actor=delegator)
         return None
 
     def propose(self, log):
@@ -773,6 +798,8 @@ class Paper:
                 member_doc_ref.set(new_member.toJson())
             
             print(f"Successfully saved proposal {proposal_id} to DAO {self.dao}")
+            self._activity(log, 'proposalCreated', p.name, actor=proposer, target_kind='proposal',
+                           target_id=proposal_id, target_label=p.name, extra={'proposalType': type_})
 
         except Exception as e:
             print(f"Error saving proposal {proposal_id} or updating member {proposer} in DAO {self.dao}: {e}")
@@ -878,6 +905,15 @@ class Paper:
             transaction.commit()
             batch.commit()
             print(f"Vote by {voter} on proposal {proposal_id} processed.")
+            title = self._proposal_title(proposal_id)
+            # Elections tally option indexes; other proposals 0 against, 1 for, 2 abstain
+            snap = proposal_doc_ref.get()
+            if snap.exists and (snap.to_dict() or {}).get('optionSource'):
+                choice = f"option {support}"
+            else:
+                choice = {0: 'Against', 1: 'For', 2: 'Abstain'}.get(support, str(support))
+            self._activity(log, 'vote', f"Voted {choice} on {title}", actor=voter, target_kind='proposal',
+                           target_id=proposal_id, target_label=title)
         except Exception as e:
             print(f"Error during vote processing for proposal {proposal_id} by {voter}: {e}")
 
@@ -911,6 +947,9 @@ class Paper:
                 
             })
             print(f"Proposal {proposal_id} queued in DAO {self.dao}.")
+            title = self._proposal_title(proposal_id)
+            self._activity(log, 'proposalQueued', f"Queued {title}", target_kind='proposal',
+                           target_id=proposal_id, target_label=title)
         except Exception as e:
             print(f"Error updating proposal {proposal_id} on queue event in DAO {self.dao}: {e}")
 
@@ -1106,6 +1145,9 @@ class Paper:
                 dao_doc_ref.update(dao_updates)
             proposal_doc_ref.update(updates_for_proposal)
             print(f"Proposal {proposal_id} execution processed for DAO {self.dao}.")
+            title = self._proposal_title(proposal_id)
+            self._activity(log, 'proposalExecuted', f"Executed {title}", target_kind='proposal',
+                           target_id=proposal_id, target_label=title)
 
         except Exception as e:
             import traceback
@@ -1141,6 +1183,8 @@ class Paper:
         value = args['value']
         
         print(f"RegistryUpdated: key='{key}' for DAO {self.dao}")
+        shown = value if len(value) <= 60 else value[:57] + '...'
+        self._activity(log, 'registryEdit', f"Set {key} to {shown}" if value else f"Cleared {key}")
 
         # If key is 'description', update the DAO's description field
         if key == 'description':
@@ -1175,7 +1219,7 @@ class Paper:
                 return self.economy_attached(log, value) if value else self.economy_detached()
             # The autonet module: the main loop follows the jurisdiction's Substrate
             if key == 'jurisdiction.autonet.substrate' and Web3.is_address(value):
-                return [('substrate', Web3.to_checksum_address(value))]
+                return [('substrate', Web3.to_checksum_address(value), self.dao)]
 
         return None
 
@@ -1247,6 +1291,14 @@ class Paper:
         if args['from'] == self.ZERO_ADDRESS or args['to'] == self.ZERO_ADDRESS:
             self.daos_collection.document(self.dao).set(
                 {"totalSupply": str(contract.functions.totalSupply().call())}, merge=True)
+        decimals, symbol = self._token_units()
+        amount = f"{format_units(args['value'], decimals)} {symbol}".strip()
+        if args['from'] == self.ZERO_ADDRESS:
+            self._activity(log, 'mint', f"Minted {amount} to {short(args['to'])}")
+        elif args['to'] == self.ZERO_ADDRESS:
+            self._activity(log, 'burn', f"Burned {amount} from {short(args['from'])}", actor=args['from'])
+        else:
+            self._activity(log, 'transfer', f"Sent {amount} to {short(args['to'])}", actor=args['from'])
         return None
 
     def delegate_votes_changed(self, log):
@@ -1276,8 +1328,61 @@ class Paper:
                 "statusHistory.canceled": self._block_time(log),
                 "latestStage": "Canceled",
             })
+            title = self._proposal_title(proposal_id)
+            self._activity(log, 'proposalCanceled', f"Canceled {title}", target_kind='proposal',
+                           target_id=proposal_id, target_label=title)
         except Exception as e:
             print(f"Error updating proposal {proposal_id} on cancel in DAO {self.dao}: {e}")
+        return None
+
+    # ---- Debates (DebatesFactory and each Debate) ----
+
+    def debate_created(self, log):
+        """DebatesFactory.DebateCreated: record the debate under the DAO whose token it is for, and
+        return it so the main loop follows its arguments."""
+        topics = log['topics']
+        debate = Web3.to_checksum_address('0x' + bytes(topics[1])[-20:].hex())
+        token = Web3.to_checksum_address('0x' + bytes(topics[2])[-20:].hex())
+        creator = Web3.to_checksum_address('0x' + bytes(topics[3])[-20:].hex())
+        from eth_abi import decode
+        title, _ = decode(['string', 'uint256'], bytes(log['data']))
+        dao = None
+        for candidate in (token, token.lower()):
+            for doc in self.daos_collection.where('token', '==', candidate).limit(1).stream():
+                dao = doc.id
+        if dao is None:
+            print(f"DebateCreated for token {token}, which no indexed DAO has; skipping")
+            return None
+        self.daos_collection.document(dao).collection('debates').document(debate.lower()).set({
+            'address': debate, 'title': title, 'creator': creator, 'token': token,
+            'createdAt': self._block_time(log),
+        })
+        self._activity(log, 'debateCreated', f"Opened the debate {title}", dao=dao, actor=creator,
+                       target_kind='debate', target_id=debate, target_label=title)
+        return [('debate', debate, dao)]
+
+    def _debate_title(self):
+        if not hasattr(self, '_title'):
+            snap = self.daos_collection.document(self.dao).collection('debates').document(self.address.lower()).get()
+            self._title = (snap.to_dict() or {}).get('title', '') if snap.exists else ''
+        return self._title
+
+    def debate_event(self, log, func):
+        from eth_abi import decode
+        topics, data = log['topics'], bytes(log['data'])
+        title = self._debate_title()
+        target = dict(target_kind='debate', target_id=self.address, target_label=title)
+        if func == 'ArgumentAdded':
+            author = Web3.to_checksum_address('0x' + bytes(topics[3])[-20:].hex())
+            arg_type, _, content = decode(['uint8', 'uint256', 'string'], data)
+            shown = content if len(content) <= 80 else content[:77] + '...'
+            self._activity(log, 'debateArgument', f"Argued {'con' if arg_type == 1 else 'pro'}: {shown}", actor=author, **target)
+        elif func == 'WeightAdded':
+            argument = int.from_bytes(bytes(topics[1]), 'big')
+            contributor = Web3.to_checksum_address('0x' + bytes(topics[2])[-20:].hex())
+            self._activity(log, 'debateWeight', f"Backed argument #{argument}", actor=contributor, **target)
+        elif func == 'DebateClosed':
+            self._activity(log, 'debateClosed', "Closed the debate", **target)
         return None
 
     def handle_event(self, log, func=None):
@@ -1326,5 +1431,11 @@ class Paper:
         elif self.kind == "registry":
             if func == "RegistryUpdated":
                 return self.registry_updated(log)
+        elif self.kind == "debates_factory":
+            if func == "DebateCreated":
+                return self.debate_created(log)
+        elif self.kind == "debate":
+            if func in ("ArgumentAdded", "WeightAdded", "DebateClosed"):
+                return self.debate_event(log, func)
         return None
 # apps/homebase/paper.py

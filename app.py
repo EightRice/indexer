@@ -329,20 +329,24 @@ for app_name in apps_to_run:
 # --- Autonet: follow every jurisdiction's Substrate ---
 # Each jurisdiction with the autonet module records its Substrate in the registry; the DAO
 # indexer keeps those maps, so read them once here, and the main loop adds new ones live.
-def add_substrate_paper(address):
+def add_substrate_paper(address, dao=None):
+    # A jurisdiction's agent events also go to its DAO's activity feed (homebase Firestore)
+    dao_ref = app_data['homebase']['daos_collection'].document(dao) if dao and 'homebase' in app_data else None
     if address in papers:
+        if dao_ref is not None and getattr(papers[address], 'dao_ref', None) is None:
+            papers[address].dao_ref = dao_ref
         return
     from apps.autonet.paper import Paper as AutonetPaper
     papers[address] = AutonetPaper(address, web3, app_dbs['autonet'],
-                                   app_configs['autonet'].get('agents_collection', 'agents'))
+                                   app_configs['autonet'].get('agents_collection', 'agents'), dao_ref=dao_ref)
     if address not in listening_to_addresses:
         listening_to_addresses.append(address)
     print(f"[autonet] Following Substrate {address}")
 
 if 'autonet' in apps_to_run and 'homebase' in apps_to_run:
     try:
-        for substrate in app_modules['autonet']['indexer'].jurisdiction_substrates(app_data['homebase']['daos_collection']):
-            add_substrate_paper(substrate)
+        for substrate, dao in app_modules['autonet']['indexer'].jurisdiction_substrates(app_data['homebase']['daos_collection']):
+            add_substrate_paper(substrate, dao)
     except Exception as e:
         print(f"Warning: could not read jurisdiction Substrates: {e}")
 
@@ -678,7 +682,16 @@ while True:
                             )})
                         print(f"Now listening to {len(listening_to_addresses)} addresses.")
                     elif item[0] == 'substrate' and 'autonet' in apps_to_run:
-                        add_substrate_paper(item[1])
+                        add_substrate_paper(item[1], item[2] if len(item) > 2 else None)
+                    elif item[0] == 'debate' and 'homebase' in apps_to_run:
+                        # A new debate: follow its arguments, recorded under its DAO
+                        debate_new = Web3.to_checksum_address(item[1])
+                        if debate_new not in listening_to_addresses: listening_to_addresses.append(debate_new)
+                        if debate_new not in papers:
+                            from apps.homebase.paper import Paper as HomebasePaper
+                            papers[debate_new] = HomebasePaper(address=debate_new, kind="debate",
+                                                               daos_collection=app_data['homebase']['daos_collection'],
+                                                               db=app_dbs['homebase'], web3=web3, dao=item[2])
                     elif item[0] == 'registry' and 'homebase' in apps_to_run:
                         # Registry for Economy DAO description updates
                         registry_address_new = Web3.to_checksum_address(item[1])
