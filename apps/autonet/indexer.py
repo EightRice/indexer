@@ -72,8 +72,9 @@ def setup_papers(db, web3: Web3, network_config: dict):
 def jurisdiction_substrates(daos_collection) -> list:
     """Every indexed jurisdiction's Substrate with its DAO, (substrate, dao doc id), from its
     jurisdiction.autonet.substrate registry entry (the DAO indexer keeps each DAO's registry map)."""
+    import startup_cache
     out = []
-    for doc in daos_collection.stream():
+    for doc in startup_cache.dao_docs(daos_collection):
         value = ((doc.to_dict() or {}).get("registry") or {}).get("jurisdiction.autonet.substrate", "")
         if Web3.is_address(value):
             out.append((Web3.to_checksum_address(value), doc.id))
@@ -119,6 +120,7 @@ def run_historical_sync(db, web3: Web3, network_config: dict, alert_func):
     # Shadownet rejects large eth_getLogs ranges (-32062); chunk conservatively.
     CHUNK = 500
     print(f"[autonet] historical sync {from_block}..{head} on {address}")
+    failed = False
     b = from_block
     while b <= head:
         to_b = min(b + CHUNK - 1, head)
@@ -137,5 +139,18 @@ def run_historical_sync(db, web3: Web3, network_config: dict, alert_func):
                     paper.handle_event(dict(entry), func=name)
         except Exception as e:
             print(f"[autonet] historical chunk {b}..{to_b} failed: {e}")
+            failed = True
         b = to_b + 1
     print("[autonet] historical sync done")
+    # Our checkpoint, so the next start's sync begins here instead of rescanning (app.py's main loop
+    # resumes from the checkpoints as read before the syncs). A failed chunk leaves it, to be retried.
+    if not failed:
+        _write_checkpoint(db, doc_name, head)
+
+
+def _write_checkpoint(db, doc_name, block):
+    try:
+        db.collection("contracts").document(doc_name).set({"lastSyncedBlock": block}, merge=True)
+        print(f"[autonet] checkpoint updated to block {block}")
+    except Exception as e:
+        print(f"[autonet] could not update checkpoint: {e}")

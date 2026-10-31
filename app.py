@@ -269,19 +269,33 @@ def read_checkpoint():
     return min(blocks) if blocks else None
 
 def write_checkpoint(block):
+    # Apps sharing a Firestore keep their fields in the same doc: one write per doc
+    by_doc = {}
     for name, ref, field in _checkpoint_refs():
+        entry = by_doc.setdefault((id(ref._client), ref.path), [ref, [], {}])
+        entry[1].append(name)
+        entry[2][field] = block
+    for ref, names, fields in by_doc.values():
         try:
-            ref.set({field: block}, merge=True)
+            ref.set(fields, merge=True)
         except Exception as e:
-            print(f"Warning: Could not update lastSyncedBlock for {name}: {e}")
+            print(f"Warning: Could not update lastSyncedBlock for {', '.join(names)}: {e}")
 
 # --- Historical Sync for All Apps ---
 # Only run if: checkpoint exists AND --skip-historical is NOT set
+#
+# The main loop resumes from the lowest checkpoint as it was BEFORE these syncs, so it replays the
+# whole downtime gap. That is deliberate: the per-app syncs don't cover everything the live loop does
+# (linking appeal and veto proposals to their projects, the jurisdictions' Substrates, SupermajoritySet
+# entries), and every handler is idempotent (proposals and DAOs are created once, votes are skipped
+# once recorded, balances are read from chain), so the replay adds what is missing and changes nothing
+# else.
+resume_checkpoint = read_checkpoint()
 if args.skip_historical:
     print("\n=== SKIPPING HISTORICAL SYNC (--skip-historical flag) ===")
 else:
     # Check if checkpoint exists
-    checkpoint_exists = read_checkpoint() is not None
+    checkpoint_exists = resume_checkpoint is not None
 
     if not checkpoint_exists:
         print("\n=== SKIPPING HISTORICAL SYNC (no checkpoint found) ===")
@@ -337,6 +351,8 @@ for app_name in apps_to_run:
         alert(error_msg)
         sys.exit(1)
 
+import startup_cache
+
 # --- Autonet: follow every jurisdiction's Substrate ---
 # Each jurisdiction with the autonet module records its Substrate in the registry; the DAO
 # indexer keeps those maps, so read them once here, and the main loop adds new ones live.
@@ -360,6 +376,9 @@ if 'autonet' in apps_to_run and 'homebase' in apps_to_run:
             add_substrate_paper(substrate, dao)
     except Exception as e:
         print(f"Warning: could not read jurisdiction Substrates: {e}")
+
+# Startup reads were shared through startup_cache; the main loop reads live
+startup_cache.clear()
 
 # --- Finalize Listener Setup ---
 listening_to_addresses = list(set([addr for addr in listening_to_addresses if addr]))
@@ -557,6 +576,8 @@ BLOCK_HEADROOM = 3  # Query logs 3 blocks behind the head of the chain for safet
 APPEAL_CHECK_SECONDS = 30  # between checks of open appeal proposals
 last_appeal_check = 0
 MAX_BLOCK_RANGE = 500 # Process a maximum of 500 blocks at a time to not overload the RPC
+CHECKPOINT_INTERVAL = 60  # seconds between Firestore checkpoint writes
+last_checkpoint_write = 0
 
 while True:
     heartbeat += 1
@@ -575,7 +596,7 @@ while True:
                 last_processed_block = max(0, latest_on_chain - 15)
                 print(f"Skipping historical sync. Starting from block {last_processed_block}.")
             else:
-                checkpoint_block = read_checkpoint()
+                checkpoint_block = resume_checkpoint
 
                 # Use checkpoint if available, otherwise start from latest - 15
                 if checkpoint_block is not None and checkpoint_block > 0:
@@ -796,11 +817,13 @@ while True:
         # Update Firestore checkpoint - ONLY if we're primary (or standalone)
         should_write_to_firestore = (current_role in ['primary', 'standalone'])
 
-        # Update checkpoint if we found events OR every 50 heartbeats to prevent stale checkpoints
-        should_update_checkpoint = logs or (heartbeat % 50 == 0)
+        # At most once a minute: a restart resumes from the checkpoint and the handlers are idempotent,
+        # so a checkpoint up to a minute old only means re-reading that minute of logs
+        should_update_checkpoint = time.time() - last_checkpoint_write >= CHECKPOINT_INTERVAL
 
         if apps_to_run and should_update_checkpoint and should_write_to_firestore:
             write_checkpoint(last_processed_block)
+            last_checkpoint_write = time.time()
 
         # Send heartbeat to peer
         if redundancy_protocol and current_role in ['primary', 'secondary']:
