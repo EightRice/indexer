@@ -51,6 +51,24 @@ def _decode_anchor_election(calldatas):
         return None
 
 
+# A project appeal: the DAO overrules (or replaces a silent) arbiter of one of its Economy's projects
+DAO_OVERRULE_SELECTOR = Web3.keccak(text="daoOverrule(uint256,string)")[:4]
+
+
+def _decode_appeal(targets, calldatas):
+    """{project, percent, ruling} if the proposal is exactly one daoOverrule call, else None."""
+    if len(calldatas) != 1:
+        return None
+    data = bytes(calldatas[0]) if not isinstance(calldatas[0], str) else bytes.fromhex(calldatas[0].removeprefix("0x"))
+    if data[:4] != DAO_OVERRULE_SELECTOR:
+        return None
+    try:
+        from eth_abi import decode
+        percent, ruling = decode(["uint256", "string"], data[4:])
+    except Exception:
+        return None
+    return {"project": Web3.to_checksum_address(targets[0]), "percent": int(percent), "ruling": ruling}
+
 class Paper:
     ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
     def __init__(self, address, kind, web3, daos_collection, db, dao=None, token=None):
@@ -662,6 +680,15 @@ class Paper:
             desc = (f"Elects the anchor of Autonet epoch {election[0]} (attempt {election[1]}) among the options "
                     f"registered by drawn agents. The winning option is anchored on the Substrate when this executes.")
 
+        # werule names these "appeal"; one made elsewhere gets the type, and a title if it has none
+        appeal = _decode_appeal(targets, calldatas_raw)
+        if appeal is not None:
+            type_ = "appeal"
+            if len(parts) < 4:
+                name = f"Appeal: project {appeal['project']}"
+                desc = (f"Overrules the arbitration of project {appeal['project']}: {appeal['percent']}% of the "
+                        f"funds to the contractor.\n\n{appeal['ruling']}")
+
         p = Proposal(name=name, org=self.dao)
         p.author = proposer
         p.id = proposal_id
@@ -698,6 +725,8 @@ class Paper:
             doc.update({'epochNumber': int(election[0]), 'attempt': int(election[1])})
         if option_source:
             doc.update({'optionSource': option_source, 'optionVotes': {}, 'votesCast': 0})
+        if appeal is not None:
+            doc.update({'appealProject': appeal['project'].lower(), 'appealPercent': appeal['percent']})
         try:
             proposal_doc_ref.set(doc)
 
