@@ -21,8 +21,18 @@ class Member:
             'constituents': self.constituents,
             'proposalsVoted': self.proposalsVoted,
             'proposalsCreated': self.proposalsCreated,
+            'balanceSort': balance_sort(self.personalBalance),
             'lastSeen': datetime.now(timezone.utc)
         }
+
+
+def balance_sort(balance):
+    """personalBalance (a uint256 string) as a number, so apps can order members by balance in a query.
+    Only for ordering: a double loses precision past 2^53 wei."""
+    try:
+        return float(int(balance))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 class ProposalStatus(Enum):

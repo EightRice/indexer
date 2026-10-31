@@ -3,12 +3,12 @@
 from apps.homebase.abis import wrapperAbi, daoAbiGlobal, tokenAbiGlobal, wrapper_token_abi, timelock_min_delay_abi, wrapper_w_abi, trustless_wrapper_abi, registryAbi
 from activity import record_activity, format_units, short
 from datetime import datetime, timezone, timedelta
-from apps.homebase.entities import ProposalStatus, Proposal, StateInContract, Txaction, Token, Member, Org, Vote
+from apps.homebase.entities import ProposalStatus, Proposal, StateInContract, Txaction, Token, Member, Org, Vote, balance_sort
 import re
 from web3 import Web3
 from google.cloud import firestore
 from google.cloud.firestore_v1.field_path import FieldPath
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import NotFound, AlreadyExists
 import codecs
 from apps.generic.converting import decode_function_parameters
 from apps.homebase.eventSignatures import quorum_function_abi, voting_period_function_abi,proposal_threshold_function_abi, voting_delay_function_abi, mint_function_abi, burn_function_abi
@@ -149,12 +149,43 @@ class Paper:
     def _activity(self, log, type_, summary, dao=None, **kw):
         record_activity(self.daos_collection.document(dao or self.dao), self.web3, log, type_, summary, **kw)
 
+    # Shared by every paper in the process: proposal titles seen (for activity entries), and member
+    # documents known to exist (so updates merge without reading first). Both only grow; a title or
+    # a member doc doesn't go away.
+    _titles = {}
+    _known_members = set()
+
+    def _remember_title(self, proposal_id, title):
+        if title:
+            self._titles[(self.daos_collection.id, self.dao, proposal_id)] = title
+
     def _proposal_title(self, proposal_id):
+        key = (self.daos_collection.id, self.dao, proposal_id)
+        if key in self._titles:
+            return self._titles[key]
         try:
             snap = self.daos_collection.document(self.dao).collection('proposals').document(proposal_id).get()
-            return (snap.to_dict() or {}).get('title') or f"proposal {proposal_id[:8]}" if snap.exists else f"proposal {proposal_id[:8]}"
+            title = (snap.to_dict() or {}).get('title') if snap.exists else None
         except Exception:
-            return f"proposal {proposal_id[:8]}"
+            title = None
+        if title:
+            self._titles[key] = title
+        return title or f"proposal {proposal_id[:8]}"
+
+    def _member_key(self, address, dao=None):
+        return (self.daos_collection.id, dao or self.dao, address)
+
+    def _remember_member(self, address, dao=None):
+        self._known_members.add(self._member_key(address, dao))
+
+    def _member_exists(self, address):
+        """Whether the member doc exists, read at most once per member per process"""
+        if self._member_key(address) in self._known_members:
+            return True
+        if self._member_ref(address).get().exists:
+            self._remember_member(address)
+            return True
+        return False
 
     def _supermajority(self, governor, proposal_id=None):
         """The governor's threshold, or a proposal's (0 if unprotected); None if the governor predates them"""
@@ -165,11 +196,11 @@ class Paper:
         except Exception:
             return None
 
-    def refresh_supermajority(self, dao=None):
-        """Records the DAO's supermajority threshold on its document"""
+    def refresh_supermajority(self, dao=None, known=None):
+        """Records the DAO's supermajority threshold on its document, unless it already holds it (known)"""
         dao = dao or self.dao
         bps = self._supermajority(dao)
-        if bps is None:
+        if bps is None or bps == known:
             return
         try:
             self.daos_collection.document(dao).update({'supermajorityBps': bps})
@@ -323,6 +354,17 @@ class Paper:
         # treasuryAddress consistent with it.
         org.treasuryAddress = org.registryAddress
 
+        # One read: a replay finds the DAO indexed already (its later events are in its documents, so
+        # rewriting them would undo those), and SuiteConfigured may have recorded the economy first
+        doc_ref = self.daos_collection.document(org.address)
+        existing_doc = doc_ref.get()
+        existing_data = (existing_doc.to_dict() or {}) if existing_doc.exists else {}
+        if existing_data.get('token'):
+            print(f"DAO {org.address} already indexed; not rewriting it")
+            for pending in ('_pending_economy_addresses', '_pending_descriptions'):
+                getattr(self, pending, {}).pop(org.address, None)
+            return [org.address, org.govTokenAddress, org.registryAddress]
+
         supply = 0
         batch = self.db.batch()
         for i in range(len(members)):
@@ -332,7 +374,8 @@ class Paper:
             m = Member(address=member_address_checksum, personalBalance=str(member_balance), delegate="", votingWeight="0")
             member_doc_ref = self.daos_collection.document(org.address).collection('members').document(m.address)
             batch.set(member_doc_ref, m.toJson())
-        
+            self._remember_member(m.address, dao=org.address)
+
         org.totalSupply = str(supply)
 
         keys = args['keys']
@@ -348,14 +391,10 @@ class Paper:
             org.economy = self._pending_economy_addresses[org.address]
             del self._pending_economy_addresses[org.address]
             print(f"Applied pending economy address {org.economy} to DAO {org.address}")
-        else:
-            # Check if document already exists with economy field (SuiteConfigured may have updated it)
-            existing_doc = self.daos_collection.document(org.address).get()
-            if existing_doc.exists:
-                existing_data = existing_doc.to_dict()
-                if existing_data.get('economy'):
-                    org.economy = existing_data['economy']
-                    print(f"Preserved existing economy address {org.economy} for DAO {org.address}")
+        elif existing_data.get('economy'):
+            # SuiteConfigured recorded it on the document first
+            org.economy = existing_data['economy']
+            print(f"Preserved existing economy address {org.economy} for DAO {org.address}")
 
         # Check if there's a pending description from SuiteConfigured event
         # (For Economy DAOs, description is fetched from Registry during SuiteConfigured)
@@ -364,34 +403,16 @@ class Paper:
             del self._pending_descriptions[org.address]
             print(f"Applied pending description to DAO {org.address}: {org.description[:50]}...")
 
-        # Debug: print economy value before serialization
         dao_json = org.toJson()
-        print(f"[DEBUG] org.economy value: {org.economy}, type: {type(org.economy)}")
-        print(f"[DEBUG] dao_json economy: {dao_json.get('economy')}, type: {type(dao_json.get('economy'))}")
-        
-        # Force economy to be a string if it exists
         if org.economy:
             dao_json['economy'] = str(org.economy)
-            print(f"[DEBUG] Forced economy to string: {dao_json['economy']}")
-        
-        # Use set with explicit data to ensure economy is written
-        doc_ref = self.daos_collection.document(org.address)
-        
-        # Make a copy to prevent any mutation issues
-        import copy
-        dao_json_copy = copy.deepcopy(dao_json)
-        print(f"[DEBUG] About to call set() with economy: {dao_json_copy.get('economy')}")
-        
-        doc_ref.set(dao_json_copy)
-        
-        print(f"[DEBUG] After set(), dao_json_copy economy: {dao_json_copy.get('economy')}")
-        
-        # Verify what was written
-        verify_doc = doc_ref.get()
-        if verify_doc.exists:
-            verify_data = verify_doc.to_dict()
-            print(f"[DEBUG] Verified economy in Firestore: {verify_data.get('economy')}")
-        
+        # The supermajority threshold, in the same write
+        bps = self._supermajority(org.address)
+        if bps is not None:
+            dao_json['supermajorityBps'] = bps
+
+        # The DAO and its initial members in one commit
+        batch.set(doc_ref, dao_json)
         try:
             batch.commit()
             print(f"Successfully added DAO {org.name} / {org.address} to Firestore.")
@@ -399,7 +420,6 @@ class Paper:
             print(f"Error committing batch for DAO {org.name}: {e}")
 
         self._activity(log, 'daoCreated', f"Created {org.name}", dao=org.address)
-        self.refresh_supermajority(org.address)
         return [org.address, org.govTokenAddress, org.registryAddress]
 
 
@@ -417,6 +437,12 @@ class Paper:
         args = decoded_event['args']
         dao_name = args['daoName']
         print(f"New DAO (wrapped wrapper): {dao_name} from event")
+        # A replay finds it indexed already, with its later events in it: don't rewrite it
+        dao_address = args['daoAddress']
+        existing = self.daos_collection.document(dao_address).get()
+        if existing.exists and (existing.to_dict() or {}).get('token'):
+            print(f"DAO {dao_address} already indexed; not rewriting it")
+            return [dao_address, args['wrappedTokenAddress'], args['registryAddress']]
         org = Org(name=dao_name)
         org.creationDate = self._block_time(log)
         org.govTokenAddress = args['wrappedTokenAddress']
@@ -522,13 +548,14 @@ class Paper:
 
         org.registry = {}
 
-        # Debug: print economy value before serialization
         dao_json = org.toJson()
-        print(f"[DEBUG] DAO toJson economy field: {dao_json.get('economy')}")
+        # The supermajority threshold (governors that have one), in the same write
+        bps = self._supermajority(org.address)
+        if bps is not None:
+            dao_json['supermajorityBps'] = bps
         self.daos_collection.document(org.address).set(dao_json)
         print(f"Successfully added DAO (wrapped) {org.name} / {org.address} to Firestore.")
         self._activity(log, 'daoCreated', f"Created {org.name}", dao=org.address)
-        self.refresh_supermajority(org.address)
         return [org.address, org.govTokenAddress, org.registryAddress]
 
 
@@ -634,8 +661,7 @@ class Paper:
         batch = self.db.batch()
         delegator_member_ref = self.daos_collection.document(self.dao).collection('members').document(delegator)
         
-        delegator_doc = delegator_member_ref.get()
-        if not delegator_doc.exists:
+        if not self._member_exists(delegator):
             print(f"Delegator {delegator} not found as member in DAO {self.dao}. Creating.")
             try:
                 token_contract_instance = self.get_contract()
@@ -652,8 +678,7 @@ class Paper:
 
         if to_delegate != self.ZERO_ADDRESS and to_delegate != delegator:
             to_delegate_member_ref = self.daos_collection.document(self.dao).collection('members').document(to_delegate)
-            to_delegate_doc = to_delegate_member_ref.get()
-            if not to_delegate_doc.exists:
+            if not self._member_exists(to_delegate):
                 print(f"Delegatee {to_delegate} not found as member in DAO {self.dao}. Creating.")
                 try:
                     token_contract_instance = self.get_contract()
@@ -677,6 +702,9 @@ class Paper:
         
         try:
             batch.commit()
+            self._remember_member(delegator)
+            if to_delegate != self.ZERO_ADDRESS:
+                self._remember_member(to_delegate)
         except Exception as e:
             print(f"Error committing batch for delegation in DAO {self.dao}: {e}")
         summary = "Delegated to themselves" if to_delegate == delegator else (
@@ -827,10 +855,17 @@ class Paper:
         if veto_project is not None:
             doc.update({'vetoProject': veto_project.lower()})
         try:
-            proposal_doc_ref.set(doc)
+            # create(), not set(): on a replay the proposal already holds its votes and later stages
+            try:
+                proposal_doc_ref.create(doc)
+            except AlreadyExists:
+                print(f"Proposal {proposal_id} already indexed; keeping it")
+                self._remember_title(proposal_id, doc.get('title'))
+                return None
+            self._remember_title(proposal_id, doc.get('title'))
 
             member_doc_ref = self.daos_collection.document(self.dao).collection('members').document(proposer)
-            if member_doc_ref.get().exists:
+            if self._member_exists(proposer):
                  member_doc_ref.update({"proposalsCreated": firestore.ArrayUnion([proposal_id])})
             else:
                 print(f"Proposer {proposer} not found. Creating member entry.")
@@ -845,6 +880,7 @@ class Paper:
                 new_member = Member(address=proposer, personalBalance=balance, delegate="", votingWeight="0")
                 new_member.proposalsCreated = [proposal_id]
                 member_doc_ref.set(new_member.toJson())
+                self._remember_member(proposer)
             
             print(f"Successfully saved proposal {proposal_id} to DAO {self.dao}")
             self._activity(log, 'proposalCreated', p.name, actor=proposer, target_kind='proposal',
@@ -886,20 +922,12 @@ class Paper:
         vote_obj.reason = reason
         vote_obj.hash = tx_hash_hex
         
-        proposal_votes_collection_ref = self.daos_collection.document(self.dao).collection('proposals').document(proposal_id).collection("votes")
-        vote_doc_ref = proposal_votes_collection_ref.document(voter)
-        if vote_doc_ref.get().exists:
-            print(f"Vote by {voter} on proposal {proposal_id} already indexed; skipping replay.")
-            return None
-
-        batch = self.db.batch()
-        batch.set(vote_doc_ref, vote_obj.toJson())
-
+        proposal_doc_ref = self.daos_collection.document(self.dao).collection('proposals').document(proposal_id)
+        vote_doc_ref = proposal_doc_ref.collection("votes").document(voter)
         member_doc_ref = self.daos_collection.document(self.dao).collection('members').document(voter)
-        if member_doc_ref.get().exists:
-            batch.update(member_doc_ref, {"proposalsVoted": firestore.ArrayUnion([proposal_id])})
-        else:
-            print(f"Voter {voter} not found. Creating member entry for vote.")
+        member_known = self._member_key(voter) in self._known_members
+
+        def new_member_json():
             balance = "0"
             if self.token_paper and self.token_paper.address:
                 token_contract_for_dao = self.get_specific_contract(self.token_paper.address, tokenAbiGlobal)
@@ -909,16 +937,25 @@ class Paper:
                     except: pass
             new_member = Member(address=voter, personalBalance=balance, delegate="", votingWeight="0")
             new_member.proposalsVoted = [proposal_id]
-            batch.set(member_doc_ref, new_member.toJson())
-            
-        proposal_doc_ref = self.daos_collection.document(self.dao).collection('proposals').document(proposal_id)
-        
+            return new_member.toJson()
+
+        # One transaction: the vote doc (a replay skips), the proposal (read once, for the tally, the
+        # title and whether it is an election) and the member, then all three writes
         @firestore.transactional
         def update_proposal_votes(transaction, proposal_ref, weight_val, support_val):
+            if vote_doc_ref.get(transaction=transaction).exists:
+                return 'replay', None
             proposal_snapshot = proposal_ref.get(transaction=transaction)
+            member_exists = member_known or member_doc_ref.get(transaction=transaction).exists
+            transaction.set(vote_doc_ref, vote_obj.toJson())
+            if member_exists:
+                transaction.update(member_doc_ref, {"proposalsVoted": firestore.ArrayUnion([proposal_id])})
+            else:
+                print(f"Voter {voter} not found. Creating member entry for vote.")
+                transaction.set(member_doc_ref, new_member_json())
             if not proposal_snapshot.exists:
                 print(f"Proposal {proposal_id} not found during vote update transaction.")
-                return
+                return 'ok', {}
 
             prop_data = proposal_snapshot.to_dict()
             
@@ -947,17 +984,19 @@ class Paper:
                     'against': str(new_against),
                     'votesAgainst': current_votes_against + 1
                 })
+            return 'ok', prop_data
 
         try:
-            transaction = self.db.transaction()
-            update_proposal_votes(transaction, proposal_doc_ref, int(weight), support)
-            transaction.commit()
-            batch.commit()
+            outcome, prop_data = update_proposal_votes(self.db.transaction(), proposal_doc_ref, int(weight), support)
+            if outcome == 'replay':
+                print(f"Vote by {voter} on proposal {proposal_id} already indexed; skipping replay.")
+                return None
+            self._remember_member(voter)
             print(f"Vote by {voter} on proposal {proposal_id} processed.")
+            self._remember_title(proposal_id, prop_data.get('title'))
             title = self._proposal_title(proposal_id)
             # Elections tally option indexes; other proposals 0 against, 1 for, 2 abstain
-            snap = proposal_doc_ref.get()
-            if snap.exists and (snap.to_dict() or {}).get('optionSource'):
+            if prop_data.get('optionSource'):
                 choice = f"option {support}"
             else:
                 choice = {0: 'Against', 1: 'For', 2: 'Abstain'}.get(support, str(support))
@@ -1084,6 +1123,7 @@ class Paper:
             return
 
         prop_data_from_db = proposal_snapshot.to_dict()
+        self._remember_title(proposal_id, prop_data_from_db.get('title'))
         
         updates_for_proposal = {
             "statusHistory.executed": self._block_time(log),
@@ -1147,10 +1187,8 @@ class Paper:
             if proposal_type == "registry" and proposal_calldatas:
                 key, value = self.decode_params(proposal_calldatas[0])
                 if key is not None and value is not None:
-                    current_dao_data = dao_doc_ref.get().to_dict()
-                    registry_map = current_dao_data.get("registry", {})
-                    registry_map[key] = value
-                    dao_updates["registry"] = registry_map
+                    # Just this key; keys contain dots, so quote them as one map field
+                    dao_updates[FieldPath('registry', key).to_api_repr()] = value
                     print(f"DAO {self.dao} registry updated: {key} -> {value}")
                     # Also update the description field if key is "description"
                     if key == "description":
@@ -1172,8 +1210,9 @@ class Paper:
                             
                             new_balance = target_token_contract.functions.balanceOf(member_address_affected).call()
                             member_doc_ref = self.daos_collection.document(self.dao).collection('members').document(member_address_affected)
-                            if member_doc_ref.get().exists:
-                                member_doc_ref.update({"personalBalance": str(new_balance)})
+                            if self._member_exists(member_address_affected):
+                                member_doc_ref.update({"personalBalance": str(new_balance),
+                                                       "balanceSort": balance_sort(new_balance)})
                             else:
                                 print(f"Member {member_address_affected} not found for mint/burn. Creating.")
                                 new_member = Member(address=member_address_affected, personalBalance=str(new_balance), delegate="", votingWeight="0")
@@ -1298,10 +1337,10 @@ class Paper:
         """jurisdiction.economy cleared: unlink the DAO doc. Its projects keep running and stay
         indexed under the DAO."""
         try:
-            snap = self.daos_collection.document(self.dao).get()
-            if snap.exists:
-                snap.reference.update({'economy': firestore.DELETE_FIELD})
-                print(f"DAO {self.dao} economy detached")
+            self.daos_collection.document(self.dao).update({'economy': firestore.DELETE_FIELD})
+            print(f"DAO {self.dao} economy detached")
+        except NotFound:
+            pass
         except Exception as e:
             print(f"Error detaching economy from DAO {self.dao}: {e}")
         return None
@@ -1311,14 +1350,18 @@ class Paper:
         return self.daos_collection.document(self.dao).collection('members').document(address)
 
     def _upsert_member(self, address, fields):
-        """Merge fields into a member doc, creating a full member record if it doesn't exist yet."""
+        """Merge fields into a member doc, creating a full member record if it doesn't exist yet.
+        A member already seen by this process is merged without reading it first."""
         ref = self._member_ref(address)
-        if ref.get().exists:
+        if "personalBalance" in fields:
+            fields = {**fields, "balanceSort": balance_sort(fields["personalBalance"])}
+        if self._member_exists(address):
             ref.set(fields, merge=True)
         else:
             member = Member(address=address, personalBalance=fields.get("personalBalance", "0"),
                             delegate="", votingWeight=fields.get("votingWeight", "0"))
             ref.set({**member.toJson(), **fields})
+            self._remember_member(address)
 
     def transfer(self, log):
         """Token Transfer (incl. mints from REP claims, coin offering, wrapping): refresh both balances."""
@@ -1399,6 +1442,8 @@ class Paper:
         for candidate in (token, token.lower()):
             for doc in self.daos_collection.where('token', '==', candidate).limit(1).stream():
                 dao = doc.id
+            if dao:
+                break
         if dao is None:
             print(f"DebateCreated for token {token}, which no indexed DAO has; skipping")
             return None

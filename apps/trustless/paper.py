@@ -8,6 +8,7 @@ from web3 import Web3
 from apps.trustless.abis import economyAbi, projectAbi, projectReadAbi
 from apps.trustless.entities import Project, Transaction, Stage, ZERO_ADDRESS
 from activity import record_activity
+from google.api_core.exceptions import AlreadyExists
 
 # How a project event reads in the DAO's activity feed, before the project's name
 FEED_PHRASES = {
@@ -184,8 +185,9 @@ class Paper:
         total, immediate, locked = read_contract.functions.contributions(Web3.to_checksum_address(who)).call()
         return total, immediate, locked
 
-    def _update_amount_from_onchain(self):
-        """Read actual balance from on-chain and update Firestore amount field"""
+    def _update_amount_from_onchain(self, extra=None):
+        """Read actual balance from on-chain and update Firestore amount field, in one update with any
+        other fields of the event (extra). An unchanged amount alone isn't rewritten."""
         try:
             read_abi = json.loads(projectReadAbi)
             read_contract = self.web3.eth.contract(address=self.address, abi=read_abi)
@@ -206,8 +208,10 @@ class Paper:
                 on_chain_amount = str(self.web3.eth.get_balance(self.address))
 
             # Update project amount from on-chain data
-            self._get_project_ref().update({'amount': on_chain_amount})
-            print(f'[trustless] Updated project amount to {on_chain_amount} from on-chain balance')
+            if extra or getattr(self, '_last_amount', None) != on_chain_amount:
+                self._get_project_ref().update({**(extra or {}), 'amount': on_chain_amount})
+                self._last_amount = on_chain_amount
+                print(f'[trustless] Updated project amount to {on_chain_amount} from on-chain balance')
             return on_chain_amount
         except Exception as e:
             print(f'[trustless] Warning: Could not read/update balance: {e}')
@@ -263,8 +267,10 @@ class Paper:
             # Write to Firestore
             project_ref = self._get_project_ref(project_address)
             # On a replay the doc already reflects later events; don't reset it
-            if not project_ref.get().exists:
-                project_ref.set(project.to_firestore())
+            try:
+                project_ref.create(project.to_firestore())
+            except AlreadyExists:
+                pass
 
             # Record transaction
             self._record_transaction(log, "createProject", {
@@ -358,12 +364,8 @@ class Paper:
 
         amount = str(args['amount'])
 
-        self._get_project_ref().update({
-            'immediateReleased': amount,
-        })
-
-        # Update project amount from on-chain balance (funds left the contract)
-        self._update_amount_from_onchain()
+        # With the amount from the on-chain balance (funds left the contract), in one update
+        self._update_amount_from_onchain({'immediateReleased': amount})
 
         self._record_transaction(log, "immediateFundsReleased", {
             "contractor": args['contractor'],
@@ -419,10 +421,7 @@ class Paper:
         decoded = contract.events.ProjectClosed().process_log(log)
         args = decoded['args']
 
-        self._get_project_ref().update({
-            'stage': Stage.CLOSED,
-        })
-        self._update_amount_from_onchain()
+        self._update_amount_from_onchain({'stage': Stage.CLOSED})
 
         self._record_transaction(log, "projectClosed", {
             "by": args['by'],
