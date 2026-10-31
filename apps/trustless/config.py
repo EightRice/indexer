@@ -2,31 +2,40 @@
 
 APP_NAME = "trustless"
 
-# Firebase credentials file path (relative to indexer root)
-FIREBASE_CREDENTIALS = "secrets/trustless.json"
+# Projects are written to the homebase Firestore, under the DAO their Economy belongs to:
+# {dao_collection_name}/{dao}/projects/{project}, next to the DAO's proposals and debates.
+FIREBASE_CREDENTIALS = "homebase.json"
+
+# The checkpoint lives in the homebase contracts/{firestore_doc_name} doc, in its own field: the
+# homebase app's historical sync advances lastSyncedBlock on its own.
+CHECKPOINT_FIELD = "projectsLastSyncedBlock"
 
 # Network-specific configurations
-# Note: lastSyncedBlock checkpoint is always stored in contracts/{firestore_doc_name}
 NETWORKS = {
     "mainnet": {
         "firestore_doc_name": "Etherlink",
-        "network_collection": "Etherlink",
+        "dao_collection_name": "idaosEtherlink",
+        "checkpoint_field": CHECKPOINT_FIELD,
     },
     "testnet": {
         "firestore_doc_name": "Etherlink-Testnet",
-        "network_collection": "Etherlink-Testnet",
+        "dao_collection_name": "idaosEtherlink-Testnet",
+        "checkpoint_field": CHECKPOINT_FIELD,
     },
     "shadownet": {
         "firestore_doc_name": "Etherlink-Shadownet",
-        "network_collection": "Etherlink-Shadownet",
+        "dao_collection_name": "idaosEtherlink-Shadownet",
+        "checkpoint_field": CHECKPOINT_FIELD,
     },
     "localhost": {
         "firestore_doc_name": "Localhost",
-        "network_collection": "Localhost",
+        "dao_collection_name": "idaosLocalhost",
+        "checkpoint_field": CHECKPOINT_FIELD,
     },
     "base-sepolia": {
         "firestore_doc_name": "Base-Sepolia",
-        "network_collection": "Base-Sepolia",
+        "dao_collection_name": "idaosBase-Sepolia",
+        "checkpoint_field": CHECKPOINT_FIELD,
     },
 }
 

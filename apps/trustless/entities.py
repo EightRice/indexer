@@ -31,7 +31,7 @@ class Project:
     arbiter: str = ZERO_ADDRESS
     tokenAddress: str = ZERO_ADDRESS
     stage: str = Stage.OPEN
-    networkName: str = ""
+    daoAddress: str = ""  # the homebase DAO the Economy belongs to
     economyAddress: str = ""
     createdAt: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     amount: str = "0"  # Wei as string
@@ -56,7 +56,7 @@ class Project:
             "arbiter": self.arbiter.lower() if self.arbiter else ZERO_ADDRESS,
             "tokenAddress": self.tokenAddress.lower() if self.tokenAddress else ZERO_ADDRESS,
             "stage": self.stage,
-            "networkName": self.networkName,
+            "daoAddress": self.daoAddress,
             "economyAddress": self.economyAddress.lower() if self.economyAddress else "",
             "createdAt": self.createdAt,
             "amount": self.amount,
@@ -82,7 +82,7 @@ class Project:
             arbiter=doc_dict.get("arbiter", ZERO_ADDRESS),
             tokenAddress=doc_dict.get("tokenAddress", ZERO_ADDRESS),
             stage=doc_dict.get("stage", Stage.OPEN),
-            networkName=doc_dict.get("networkName", ""),
+            daoAddress=doc_dict.get("daoAddress", ""),
             economyAddress=doc_dict.get("economyAddress", ""),
             createdAt=doc_dict.get("createdAt", datetime.now(timezone.utc)),
             amount=doc_dict.get("amount", "0"),
@@ -144,24 +144,4 @@ class Transaction:
             "params": self.params,
             "time": self.time,
             "blockNumber": self.blockNumber,
-        }
-
-
-@dataclass
-class User:
-    """User entity for economy users subcollection"""
-    address: str
-    lastActive: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    projectsAuthored: List[str] = field(default_factory=list)
-    projectsContracted: List[str] = field(default_factory=list)
-    projectsArbitrated: List[str] = field(default_factory=list)
-    projectsBacked: List[str] = field(default_factory=list)
-
-    def to_firestore(self) -> dict:
-        return {
-            "lastActive": self.lastActive,
-            "projectsAuthored": self.projectsAuthored,
-            "projectsContracted": self.projectsContracted,
-            "projectsArbitrated": self.projectsArbitrated,
-            "projectsBacked": self.projectsBacked,
         }

@@ -6,35 +6,27 @@ APP_NAME = "homebase"
 # Firebase credentials file path (relative to indexer root)
 FIREBASE_CREDENTIALS = "homebase.json"
 
-# Trustless Firebase credentials (for cross-writing Economy documents)
-TRUSTLESS_FIREBASE_CREDENTIALS = "secrets/trustless.json"
-
 # Network-specific configurations
 NETWORKS = {
     "mainnet": {
         "firestore_doc_name": "Etherlink",
         "dao_collection_name": "idaosEtherlink",
-        "trustless_network_collection": "Etherlink",
     },
     "testnet": {
         "firestore_doc_name": "Etherlink-Testnet",
         "dao_collection_name": "idaosEtherlink-Testnet",
-        "trustless_network_collection": "Etherlink-Testnet",
     },
     "shadownet": {
         "firestore_doc_name": "Etherlink-Shadownet",
         "dao_collection_name": "idaosEtherlink-Shadownet",
-        "trustless_network_collection": "Etherlink-Shadownet",
     },
     "localhost": {
         "firestore_doc_name": "Localhost",
         "dao_collection_name": "idaosLocalhost",
-        "trustless_network_collection": "Localhost",
     },
     "base-sepolia": {
         "firestore_doc_name": "Base-Sepolia",
         "dao_collection_name": "idaosBase-Sepolia",
-        "trustless_network_collection": "Base-Sepolia",
     },
 }
 

@@ -6,43 +6,7 @@ import time
 from web3 import Web3
 from web3.exceptions import Web3RPCError
 from apps.homebase.paper import Paper as HomebasePaper
-from apps.homebase.config import EVENT_SIGNATURES, TRUSTLESS_FIREBASE_CREDENTIALS
-
-# Trustless Firebase app instance (initialized once)
-_trustless_db = None
-
-
-def _init_trustless_firebase():
-    """
-    Initialize Trustless Firebase app for cross-writing Economy documents.
-    Returns the Firestore client or None if initialization fails.
-    """
-    global _trustless_db
-    if _trustless_db is not None:
-        return _trustless_db
-
-    try:
-        from firebase_admin import initialize_app, firestore, credentials
-
-        cred_path = TRUSTLESS_FIREBASE_CREDENTIALS
-        if not os.path.isabs(cred_path):
-            # Make path relative to indexer root
-            indexer_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            cred_path = os.path.join(indexer_root, cred_path)
-
-        if not os.path.exists(cred_path):
-            print(f"WARNING: Trustless Firebase credentials not found at {cred_path}. Economy cross-write disabled.")
-            return None
-
-        cred = credentials.Certificate(cred_path)
-        trustless_app = initialize_app(cred, name='trustlessFromHomebase')
-        _trustless_db = firestore.client(app=trustless_app)
-        print(f"Trustless Firebase initialized successfully for cross-writing Economy documents.")
-        return _trustless_db
-    except Exception as e:
-        print(f"WARNING: Could not initialize Trustless Firebase: {e}. Economy cross-write disabled.")
-        return None
-
+from apps.homebase.config import EVENT_SIGNATURES
 
 def initialize(db, web3, network_config):
     """
@@ -55,7 +19,6 @@ def initialize(db, web3, network_config):
             - wrapper_trustless_address: str or None - Trustless wrapper address
             - jurisdiction_factory_address: str or None - JurisdictionFactory address
             - event_signatures: dict - Event signature hashes mapped to event names
-            - trustless_db: Firestore client for Trustless or None
     """
     doc_name = network_config['firestore_doc_name']
 
@@ -85,9 +48,6 @@ def initialize(db, web3, network_config):
     if wrapper_trustless_address:
         print(f"Homebase Trustless Wrapper address: {wrapper_trustless_address}")
 
-    # Initialize Trustless Firebase for cross-writing Economy documents
-    trustless_db = _init_trustless_firebase()
-
     # Build event signature mappings
     event_sigs = {}
     for sig_string in EVENT_SIGNATURES:
@@ -102,7 +62,6 @@ def initialize(db, web3, network_config):
         'wrapper_trustless_address': wrapper_trustless_address,
         'jurisdiction_factory_address': jurisdiction_factory_address,
         'event_signatures': event_sigs,
-        'trustless_db': trustless_db
     }
 
 
@@ -119,7 +78,6 @@ def run_historical_sync(db, web3, network_config, alert_func):
     """
     doc_name = network_config['firestore_doc_name']
     dao_collection_name = network_config['dao_collection_name']
-    trustless_network_collection = network_config.get('trustless_network_collection')
 
     print("\n--- Starting Homebase Historical Sync ---")
 
@@ -178,9 +136,6 @@ def run_historical_sync(db, web3, network_config, alert_func):
 
                 print(f"Scanning {len(wrapper_addresses)} wrapper addresses for factory events...")
 
-                # Get Trustless DB for cross-writing Economy documents
-                trustless_db = _init_trustless_firebase()
-
                 # Create wrapper papers
                 wrapper_papers = {}
                 if wrapper_address:
@@ -201,8 +156,7 @@ def run_historical_sync(db, web3, network_config, alert_func):
                 if wrapper_trustless_address:
                     wrapper_papers[wrapper_trustless_address] = HomebasePaper(
                         address=wrapper_trustless_address, kind="wrapper_trustless",
-                        daos_collection=daos_collection, db=db, web3=web3,
-                        trustless_db=trustless_db, trustless_network_collection=trustless_network_collection
+                        daos_collection=daos_collection, db=db, web3=web3
                     )
                 if jurisdiction_factory_address:
                     wrapper_papers[jurisdiction_factory_address] = HomebasePaper(
@@ -320,9 +274,7 @@ def run_historical_sync(db, web3, network_config, alert_func):
                 registry_contract = None
                 if dao_data.get('registryAddress'):
                     registry_paper = HomebasePaper(address=Web3.to_checksum_address(dao_data['registryAddress']), kind="registry",
-                                                   daos_collection=daos_collection, db=db, web3=web3, dao=dao_address,
-                                                   trustless_db=_init_trustless_firebase(),
-                                                   trustless_network_collection=trustless_network_collection)
+                                                   daos_collection=daos_collection, db=db, web3=web3, dao=dao_address)
                     registry_contract = registry_paper.get_contract()
 
                 if not dao_contract or not token_contract:
@@ -493,7 +445,6 @@ def setup_papers(db, web3, network_config):
     """
     doc_name = network_config['firestore_doc_name']
     dao_collection_name = network_config['dao_collection_name']
-    trustless_network_collection = network_config.get('trustless_network_collection')
 
     # Get wrapper addresses from Firestore
     homebase_doc = db.collection("contracts").document(doc_name).get()
@@ -511,9 +462,6 @@ def setup_papers(db, web3, network_config):
     daos_collection = db.collection(dao_collection_name)
     homebase_docs = list(daos_collection.stream())
     dao_addresses = [doc.id for doc in homebase_docs]
-
-    # Get Trustless DB (initialized during initialize())
-    trustless_db = _trustless_db
 
     # Create Paper objects
     papers = {}
@@ -563,15 +511,12 @@ def setup_papers(db, web3, network_config):
             web3=web3
         )
     if wrapper_trustless_address:
-        # TrustlessFactory wrapper gets additional Trustless DB for cross-writing
         papers[wrapper_trustless_address] = HomebasePaper(
             address=wrapper_trustless_address,
             kind="wrapper_trustless",
             daos_collection=daos_collection,
             db=db,
-            web3=web3,
-            trustless_db=trustless_db,
-            trustless_network_collection=trustless_network_collection
+            web3=web3
         )
 
     # DAO, Token, and Registry papers
@@ -612,9 +557,7 @@ def setup_papers(db, web3, network_config):
                     daos_collection=daos_collection,
                     db=db,
                     web3=web3,
-                    dao=dao_address,
-                    trustless_db=trustless_db,
-                    trustless_network_collection=trustless_network_collection
+                    dao=dao_address
                 )
                 papers[registry_address] = registry_paper
                 print(f"Added registry paper for DAO {dao_address[:10]}... at {registry_address}")

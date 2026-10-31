@@ -4,10 +4,19 @@ import json
 import traceback
 from datetime import datetime, timezone
 from web3 import Web3
-from google.cloud import firestore
 
 from apps.trustless.abis import economyAbi, projectAbi, projectReadAbi
-from apps.trustless.entities import Project, Backer, Transaction, Stage, ZERO_ADDRESS, User
+from apps.trustless.entities import Project, Transaction, Stage, ZERO_ADDRESS
+
+# Governor ProposalState values (OpenZeppelin)
+PENDING, ACTIVE, CANCELED, DEFEATED, SUCCEEDED, QUEUED, EXPIRED, EXECUTED = range(8)
+# DaoProposalHold.GRACE: a passed proposal holds this long after its deadline (or eta, once queued)
+HOLD_GRACE = 86400
+GOVERNOR_STATE_ABI = json.loads('''[
+  {"inputs":[{"name":"proposalId","type":"uint256"}],"name":"state","outputs":[{"name":"","type":"uint8"}],"stateMutability":"view","type":"function"},
+  {"inputs":[{"name":"proposalId","type":"uint256"}],"name":"proposalDeadline","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+  {"inputs":[{"name":"proposalId","type":"uint256"}],"name":"proposalEta","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}
+]''')
 
 
 class Paper:
@@ -17,17 +26,24 @@ class Paper:
     Kinds:
     - 'economy': Handles NewProject events from Economy contract
     - 'project': Handles all project lifecycle events from NativeProject/ERC20Project
+
+    Writes to the homebase Firestore, under the DAO the Economy belongs to:
+    {daos_collection}/{dao}/projects/{project}, with backers/ and activity/ under each project.
     """
 
     def __init__(self, address: str, kind: str, web3: Web3, db,
-                 network_collection: str, economy_address: str = None):
+                 daos_collection: str, dao_address: str, economy_address: str = None):
         self.address = Web3.to_checksum_address(address)
         self.kind = kind  # 'economy' or 'project'
         self.web3 = web3
         self.db = db
-        self.network_collection = network_collection
+        self.daos_collection = daos_collection
+        self.dao_address = Web3.to_checksum_address(dao_address)  # homebase DAO doc IDs are checksummed
         self.economy_address = economy_address  # For projects, which economy they belong to
         self.contract = None
+        # A DAO proposal overruling this project's arbiter, while it may still pass (see check_appeal)
+        self.appeal_proposal_id = None
+        self.appeal_governor = None
 
         # Set ABI based on kind
         if kind == "economy":
@@ -86,61 +102,18 @@ class Paper:
                     print(f"[trustless] Error handling {func} for {self.address}: {e}")
         return None
 
-    def _get_project_ref(self):
-        """Get Firestore reference to this project document"""
-        return (self.db.collection(self.network_collection)
-                .document(self.economy_address.lower())
-                .collection("projects")
-                .document(self.address.lower()))
+    def _projects_collection(self):
+        return (self.db.collection(self.daos_collection)
+                .document(self.dao_address)
+                .collection("projects"))
+
+    def _get_project_ref(self, project_address: str = None):
+        """Get Firestore reference to a project document (this one by default)"""
+        return self._projects_collection().document((project_address or self.address).lower())
 
     def _get_backers_collection(self):
         """Get Firestore reference to backers subcollection"""
         return self._get_project_ref().collection("backers")
-
-    def _get_transactions_collection(self):
-        """Get Firestore reference to transactions collection"""
-        # For economy papers, use self.address; for project papers, use economy_address
-        economy_addr = self.economy_address or self.address
-        return (self.db.collection(self.network_collection)
-                .document(economy_addr.lower())
-                .collection("transactions"))
-
-
-    def _get_users_collection(self):
-        """Get Firestore reference to users subcollection"""
-        economy_addr = self.economy_address or self.address
-        return (self.db.collection(self.network_collection)
-                .document(economy_addr.lower())
-                .collection("users"))
-
-    def _update_user(self, user_address: str, project_address: str, role: str, timestamp: datetime):
-        """
-        Update user document with project involvement.
-        Uses arrayUnion for idempotency.
-        role: 'authored', 'contracted', 'arbitrated', or 'backed'
-        """
-        user_addr = user_address.lower()
-        project_addr = project_address.lower()
-        
-        field_map = {
-            'authored': 'projectsAuthored',
-            'contracted': 'projectsContracted',
-            'arbitrated': 'projectsArbitrated',
-            'backed': 'projectsBacked',
-        }
-        
-        field_name = field_map.get(role)
-        if not field_name:
-            print(f"[trustless] Unknown user role: {role}")
-            return
-        
-        user_ref = self._get_users_collection().document(user_addr)
-        user_ref.set({
-            'lastActive': timestamp,
-            field_name: firestore.ArrayUnion([project_addr])
-        }, merge=True)
-        
-        print(f"[trustless] Updated user {user_addr[:10]}... as {role} for project {project_addr[:10]}...")
 
     def _record_transaction(self, log, function_name: str, params: dict = None, project_id: str = None):
         """Record a transaction in Firestore"""
@@ -148,12 +121,13 @@ class Paper:
         log_index = log.get('logIndex', 0)
         block = self.web3.eth.get_block(log['blockNumber'])
 
+        project = project_id or self.address
         tx = Transaction(
             txHash=tx_hash,
             sender=self._get_tx_sender(log),
             functionName=function_name,
-            contractAddress=self.economy_address or self.address,
-            projectId=project_id or self.address,
+            contractAddress=log['address'],
+            projectId=project,
             params=params or {},
             time=datetime.fromtimestamp(block['timestamp'], tz=timezone.utc),
             blockNumber=log['blockNumber'],
@@ -161,7 +135,7 @@ class Paper:
 
         # Use tx_hash + log_index as document ID to handle multiple events per transaction
         doc_id = f"{tx_hash}_{log_index}"
-        self._get_transactions_collection().document(doc_id).set(tx.to_firestore())
+        self._get_project_ref(project).collection("activity").document(doc_id).set(tx.to_firestore())
         print(f"[trustless] Recorded transaction: {function_name} - {tx_hash[:10]}...")
 
     def _get_tx_sender(self, log) -> str:
@@ -250,16 +224,13 @@ class Paper:
                 tokenAddress=token_address,
                 # Parties named at creation: the contract starts in pending (cooling-off running)
                 stage=Stage.PENDING if contractor not in ("", ZERO_ADDRESS) and arbiter not in ("", ZERO_ADDRESS) else Stage.OPEN,
-                networkName=self.network_collection,
+                daoAddress=self.dao_address,
                 economyAddress=self.address,
                 createdAt=created_at,
             )
 
             # Write to Firestore
-            project_ref = (self.db.collection(self.network_collection)
-                          .document(self.address.lower())
-                          .collection("projects")
-                          .document(project_address.lower()))
+            project_ref = self._get_project_ref(project_address)
             # On a replay the doc already reflects later events; don't reset it
             if not project_ref.get().exists:
                 project_ref.set(project.to_firestore())
@@ -273,10 +244,6 @@ class Paper:
             }, project_id=project_address)
 
             print(f"[trustless] Created project document: {project_address}")
-
-            # Update author's user profile
-            if author:
-                self._update_user(author, project_address, 'authored', created_at)
 
             # Return the new project address so it gets added to listeners
             return project_address
@@ -314,16 +281,6 @@ class Paper:
             "termsHash": args['_termsHash'],
         })
 
-        # Get block timestamp for lastActive
-        block = self.web3.eth.get_block(log['blockNumber'])
-        timestamp = datetime.fromtimestamp(block['timestamp'], tz=timezone.utc)
-
-        # Update user profiles for contractor and arbiter
-        if contractor and contractor != ZERO_ADDRESS:
-            self._update_user(contractor, self.address, 'contracted', timestamp)
-        if arbiter and arbiter != ZERO_ADDRESS:
-            self._update_user(arbiter, self.address, 'arbitrated', timestamp)
-
         print(f"[trustless] SetParties: contractor={args['_contractor'][:10]}...")
 
     def handle_send_funds(self, log):
@@ -356,13 +313,6 @@ class Paper:
             "amount": how_much,
             "immediateBps": immediate_bps,
         })
-
-        # Get block timestamp for lastActive
-        block = self.web3.eth.get_block(log['blockNumber'])
-        timestamp = datetime.fromtimestamp(block['timestamp'], tz=timezone.utc)
-
-        # Update user profile for backer
-        self._update_user(who, self.address, 'backed', timestamp)
 
         print(f"[trustless] SendFunds: {who[:10]}... sent {how_much} wei")
 
@@ -481,6 +431,8 @@ class Paper:
             print(f"[trustless] Ignoring overrule proposal from a different governor for {self.address}")
             return
         self._get_project_ref().update({'appealProposalId': str(proposal_id)})
+        self.appeal_proposal_id = int(proposal_id)
+        self.appeal_governor = Web3.to_checksum_address(governor)
         self._record_transaction(log, "appeal", {
             "proposer": self._get_tx_sender(log),
             "proposalId": str(proposal_id),
@@ -667,3 +619,35 @@ class Paper:
         vote_type = "dispute" if for_dispute else "release"
         print(f"[trustless] BackerVoteCast: {voter[:10]}... voted for {vote_type} with {voting_power} power")
 
+    # ============ Appeal tracking ============
+
+    def check_appeal(self, now: int):
+        """Clears the project's appealProposalId once its appeal can no longer pass: canceled,
+        defeated, expired, or past the hold grace without being queued or executed (the rule
+        DaoProposalHold.isLive applies on-chain), so the app offers Appeal and Escalate again.
+        An executed overrule closes the project, so its link stays. Returns True while still live."""
+        if self.appeal_proposal_id is None:
+            return False
+        if self.appeal_governor is None:  # loaded from Firestore at startup
+            read = self.web3.eth.contract(address=self.address, abi=json.loads(projectReadAbi))
+            self.appeal_governor = Web3.to_checksum_address(read.functions.daoGovernor().call())
+        governor = self.web3.eth.contract(address=self.appeal_governor, abi=GOVERNOR_STATE_ABI)
+        pid = self.appeal_proposal_id
+        state = governor.functions.state(pid).call()
+        if state == EXECUTED:
+            self.appeal_proposal_id = None
+            return False
+        if state in (PENDING, ACTIVE):
+            return True
+        if state == SUCCEEDED and now <= governor.functions.proposalDeadline(pid).call() + HOLD_GRACE:
+            return True
+        if state == QUEUED and now <= governor.functions.proposalEta(pid).call() + HOLD_GRACE:
+            return True
+        ref = self._get_project_ref()
+        snap = ref.get()
+        # A later appeal may have replaced it already
+        if snap.exists and str((snap.to_dict() or {}).get('appealProposalId')) == str(pid):
+            ref.update({'appealProposalId': None})
+            print(f"[trustless] Appeal proposal {pid} on {self.address} ended without executing (state {state}); link cleared")
+        self.appeal_proposal_id = None
+        return False

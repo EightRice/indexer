@@ -101,9 +101,10 @@ elif args.network == 'shadownet':
     default_rpc = "https://node.shadownet.etherlink.com"
 elif args.network == 'localhost':
     default_rpc = "http://127.0.0.1:8545"  # Hardhat node
-    # Set Firestore emulator host for localhost (matches Flutter apps' local test mode)
-    os.environ["FIRESTORE_EMULATOR_HOST"] = "127.0.0.1:8080"
-    print("Using Firestore emulator at 127.0.0.1:8080")
+    # Set Firestore emulator host for localhost (matches Flutter apps' local test mode). The e2e
+    # harness may point a second instance at another emulator; it can never be unset here.
+    os.environ["FIRESTORE_EMULATOR_HOST"] = os.getenv("LOCAL_FIRESTORE_EMULATOR_HOST") or "127.0.0.1:8080"
+    print(f"Using Firestore emulator at {os.environ['FIRESTORE_EMULATOR_HOST']}")
 elif args.network == 'base-sepolia':
     default_rpc = "https://base-sepolia-rpc.publicnode.com"
 else:
@@ -231,22 +232,24 @@ for app_name in apps_to_run:
         sys.exit(1)
 
 # --- Sync checkpoints ---
-# Each app's Firestore keeps its own lastSyncedBlock in contracts/<network doc>, so every
-# app's checkpoint stays meaningful. On resume we take the lowest, so no app misses events.
+# Each app keeps its own checkpoint in contracts/<network doc> of its Firestore, in the field its
+# network config names (lastSyncedBlock by default; apps sharing a Firestore use their own field),
+# so every app's checkpoint stays meaningful. On resume we take the lowest, so no app misses events.
 def _checkpoint_refs():
     refs = []
     for name in apps_to_run:
         doc_name = app_configs.get(name, {}).get('firestore_doc_name')
+        field = app_configs.get(name, {}).get('checkpoint_field', 'lastSyncedBlock')
         if doc_name and app_dbs.get(name) is not None:
-            refs.append((name, app_dbs[name].collection("contracts").document(doc_name)))
+            refs.append((name, app_dbs[name].collection("contracts").document(doc_name), field))
     return refs
 
 def read_checkpoint():
     blocks = []
-    for name, ref in _checkpoint_refs():
+    for name, ref, field in _checkpoint_refs():
         try:
             doc = ref.get()
-            block = doc.to_dict().get('lastSyncedBlock') if doc.exists else None
+            block = doc.to_dict().get(field) if doc.exists else None
         except Exception as e:
             print(f"Warning: Could not read lastSyncedBlock for {name}: {e}")
             continue
@@ -255,9 +258,9 @@ def read_checkpoint():
     return min(blocks) if blocks else None
 
 def write_checkpoint(block):
-    for name, ref in _checkpoint_refs():
+    for name, ref, field in _checkpoint_refs():
         try:
-            ref.set({'lastSyncedBlock': block}, merge=True)
+            ref.set({field: block}, merge=True)
         except Exception as e:
             print(f"Warning: Could not update lastSyncedBlock for {name}: {e}")
 
@@ -312,7 +315,6 @@ for app_name in apps_to_run:
             'papers': app_papers,
             'daos_collection': papers_result.get('daos_collection'),  # For homebase
             'wills_collection_name': network_config.get('wills_collection_name'),  # For afterme
-            'network_collection': papers_result.get('network_collection'),  # For trustless
         })
 
         print(f"Added {len(app_addresses)} addresses and {len(app_papers)} papers from {app_name}")
@@ -535,6 +537,8 @@ def fetch_logs(addresses, from_block, to_block):
 
 last_processed_block = -1  # Sentinel for uninitialized state
 BLOCK_HEADROOM = 3  # Query logs 3 blocks behind the head of the chain for safety
+APPEAL_CHECK_SECONDS = 30  # between checks of open appeal proposals
+last_appeal_check = 0
 MAX_BLOCK_RANGE = 500 # Process a maximum of 500 blocks at a time to not overload the RPC
 
 while True:
@@ -649,13 +653,11 @@ while True:
                         papers.update({dao_address_new: HomebasePaper(token=p_new_token, address=dao_address_new, kind="dao", daos_collection=daos_collection, db=homebase_db, dao=dao_address_new, web3=web3)})
                     if registry_address_new and registry_address_new not in papers:
                         listening_to_addresses.append(registry_address_new)
-                        papers.update({registry_address_new: HomebasePaper(address=registry_address_new, kind="registry", daos_collection=daos_collection, db=homebase_db, dao=dao_address_new, web3=web3,
-                                                                           trustless_db=homebase_data.get('trustless_db'),
-                                                                           trustless_network_collection=app_configs['homebase'].get('trustless_network_collection'))})
+                        papers.update({registry_address_new: HomebasePaper(address=registry_address_new, kind="registry", daos_collection=daos_collection, db=homebase_db, dao=dao_address_new, web3=web3)})
                     print(f"Now listening to {len(listening_to_addresses)} addresses.")
             elif isinstance(new_contract_info, list) and all(isinstance(item, tuple) for item in new_contract_info):
-                # Homebase: SuiteConfigured returns list of tuples: [('economy', addr), ('registry', addr, dao_addr)];
-                # a registry's jurisdiction.economy entry returns [('economy', addr)]
+                # Homebase: SuiteConfigured returns list of tuples: [('economy', addr, dao_addr), ('registry', addr, dao_addr)];
+                # a registry's jurisdiction.economy entry returns [('economy', addr, dao_addr)]
                 for item in new_contract_info:
                     if item[0] == 'economy' and 'trustless' in apps_to_run:
                         economy_address_new = Web3.to_checksum_address(item[1])
@@ -663,16 +665,14 @@ while True:
                         if economy_address_new not in listening_to_addresses: listening_to_addresses.append(economy_address_new)
 
                         if economy_address_new not in papers:
-                            trustless_db = app_dbs['trustless']
-                            trustless_data = app_data['trustless']
-                            network_collection = trustless_data.get('network_collection')
                             from apps.trustless.paper import Paper as TrustlessPaper
                             papers.update({economy_address_new: TrustlessPaper(
                                 address=economy_address_new,
                                 kind="economy",
                                 web3=web3,
-                                db=trustless_db,
-                                network_collection=network_collection,
+                                db=app_dbs['trustless'],
+                                daos_collection=app_data['trustless'].get('daos_collection'),
+                                dao_address=item[2],
                             )})
                         print(f"Now listening to {len(listening_to_addresses)} addresses.")
                     elif item[0] == 'substrate' and 'autonet' in apps_to_run:
@@ -696,8 +696,6 @@ while True:
                                 db=homebase_db,
                                 dao=dao_address_for_registry,
                                 web3=web3,
-                                trustless_db=homebase_data.get('trustless_db'),
-                                trustless_network_collection=app_configs['homebase'].get('trustless_network_collection'),
                             )})
                         print(f"Now listening to {len(listening_to_addresses)} addresses.")
             elif isinstance(new_contract_info, str) and new_contract_info.startswith("0x"):
@@ -715,20 +713,16 @@ while True:
                     print(f"Adding new Trustless Project {new_project_address} (economy: {economy_address[:10]}...) to listener.")
                     if new_project_address not in listening_to_addresses: listening_to_addresses.append(new_project_address)
                     if new_project_address not in papers:
-                        # Get trustless-specific data
-                        trustless_db = app_dbs['trustless']
-                        trustless_data = app_data['trustless']
-                        network_collection = trustless_data.get('network_collection')
-
-                        # Import trustless Paper class
                         from apps.trustless.paper import Paper as TrustlessPaper
 
+                        # The project's documents go under the economy's DAO
                         papers.update({new_project_address: TrustlessPaper(
                             address=new_project_address,
                             kind="project",
                             web3=web3,
-                            db=trustless_db,
-                            network_collection=network_collection,
+                            db=app_dbs['trustless'],
+                            daos_collection=app_data['trustless'].get('daos_collection'),
+                            dao_address=emitting_paper.dao_address,
                             economy_address=economy_address,
                         )})
                     print(f"Now listening to {len(listening_to_addresses)} addresses.")
@@ -763,6 +757,11 @@ while True:
 
         # IMPORTANT: Update our checkpoint after a successful run
         last_processed_block = to_block
+
+        # Governors emit nothing when a proposal is defeated or lapses, so appeal proposals are polled
+        if 'trustless' in apps_to_run and current_role != 'secondary' and time.time() - last_appeal_check >= APPEAL_CHECK_SECONDS:
+            last_appeal_check = time.time()
+            app_modules['trustless']['indexer'].check_appeals(papers, web3)
 
         # Update SQLite state (always, even if secondary)
         if state:
