@@ -195,6 +195,12 @@ for app_name in apps_to_run:
         except Exception as e:
             print(f"Warning: Could not fetch RPC from {app_name} Firestore: {e}")
 
+# Same guard on the final RPC, which the network's Firestore doc may have set
+if ((args.instance_id or "").startswith("indexer-e2e") and rpc.rstrip("/").endswith(":8545")
+        and os.getenv("E2E_ALLOW_MAIN_STACK") != "1"):
+    print(f"FATAL: e2e indexer would read the main local chain ({rpc})")
+    sys.exit(2)
+
 web3 = Web3(Web3.HTTPProvider(rpc))
 if not web3.is_connected():
     error_msg = f"Node connection to {rpc} failed!"
