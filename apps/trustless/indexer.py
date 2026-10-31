@@ -17,6 +17,7 @@ from apps.trustless.config import (
     CHECKPOINT_FIELD,
 )
 from apps.trustless.paper import Paper, DAO_LINK_FIELDS
+import startup_cache
 
 STAGE_MAP = {
     0: 'open', 1: 'pending', 2: 'ongoing', 3: 'dispute',
@@ -58,26 +59,27 @@ def _discover(db, daos_collection: str):
     Economies, from the DAO docs' `economy` field: {economy: dao}.
     Projects, from every projects subcollection under this network's DAOs:
     {project: (economy, dao, {kind: linked proposal id})}. A project stays followed after its Economy is
-    detached from the DAO, since it keeps running.
+    detached from the DAO, since it keeps running. Also {project: stage} as recorded.
+    Both reads are shared with the other apps' startup (startup_cache).
     """
     economies = {}
-    for dao_doc in db.collection(daos_collection).stream():
+    for dao_doc in startup_cache.dao_docs(db.collection(daos_collection)):
         economy = (dao_doc.to_dict() or {}).get('economy')
         dao = _checksum(dao_doc.id)
         if economy and dao and _checksum(economy):
             economies[_checksum(economy)] = dao
 
     projects = {}
-    for project_doc in db.collection_group('projects').stream():
+    stages = {}
+    for project_doc in startup_cache.subcollection_docs(db, daos_collection, 'projects'):
         dao_ref = project_doc.reference.parent.parent
-        if dao_ref is None or dao_ref.parent.id != daos_collection:
-            continue
         data = project_doc.to_dict() or {}
         project, dao, economy = _checksum(project_doc.id), _checksum(dao_ref.id), _checksum(data.get('economyAddress', ''))
         if project and dao and economy:
             links = {kind: int(data[field]) for kind, field in DAO_LINK_FIELDS.items() if data.get(field)}
             projects[project] = (economy, dao, links)
-    return economies, projects
+            stages[project] = data.get('stage', '')
+    return economies, projects, stages
 
 
 def _papers(db, web3, daos_collection, economies, projects):
@@ -132,7 +134,7 @@ def run_historical_sync(db, web3: Web3, network_config: dict, alert_func):
 
     print(f"[trustless] Syncing from block {from_block} to {current_block}")
 
-    economies, projects = _discover(db, daos_collection)
+    economies, projects, stages = _discover(db, daos_collection)
     if not economies and not projects:
         print(f"[trustless] No economies found in {daos_collection}")
     else:
@@ -149,6 +151,7 @@ def run_historical_sync(db, web3: Web3, network_config: dict, alert_func):
     events_processed = 0
 
     failures = 0
+    touched = set()
     while processed_from <= current_block and (economy_addresses or project_addresses):
         to_block = min(processed_from + chunk_size - 1, current_block)
 
@@ -179,6 +182,7 @@ def run_historical_sync(db, web3: Web3, network_config: dict, alert_func):
                     if address in papers:
                         event_name = PROJECT_EVENT_SIGNATURES[project_sig_hashes.index(topic0)].split('(')[0]
                         papers[address].handle_event(log, func=event_name)
+                        touched.add(address)
                         events_processed += 1
 
         except Exception as e:
@@ -196,8 +200,12 @@ def run_historical_sync(db, web3: Web3, network_config: dict, alert_func):
         time.sleep(0.02)
 
     print(f"[trustless] Scanned: {new_projects} new projects, {events_processed} events processed")
+    if new_projects:
+        startup_cache.invalidate(db, ('group', daos_collection, 'projects'))
 
-    # Final state verification for all projects
+    # Final state verification: each project's stage on chain against the one recorded. Known projects
+    # compare with the stage read at discovery; only a project whose events ran above, or a new one,
+    # is read again, since its handlers may have changed it.
     print(f"[trustless] Verifying final state...")
     read_abi = json.loads(projectReadAbi)
     verified = 0
@@ -205,12 +213,16 @@ def run_historical_sync(db, web3: Web3, network_config: dict, alert_func):
         try:
             contract_stage = STAGE_MAP.get(web3.eth.contract(address=address, abi=read_abi).functions.stage().call(), 'unknown')
             ref = papers[address]._get_project_ref()
-            doc = ref.get()
-            if doc.exists:
+            if address in stages and address not in touched:
+                fs_stage = stages[address]
+            else:
+                doc = ref.get()
+                if not doc.exists:
+                    continue
                 fs_stage = doc.to_dict().get('stage', '')
-                if fs_stage != contract_stage:
-                    ref.update({'stage': contract_stage})
-                    print(f"[trustless]   Fixed {address[:10]}...: {fs_stage} -> {contract_stage}")
+            if fs_stage != contract_stage:
+                ref.update({'stage': contract_stage})
+                print(f"[trustless]   Fixed {address[:10]}...: {fs_stage} -> {contract_stage}")
             verified += 1
         except Exception:
             pass
@@ -235,7 +247,7 @@ def setup_papers(db, web3: Web3, network_config: dict):
     daos_collection = network_config['dao_collection_name']
     print(f"[trustless] Setting up papers for {daos_collection}...")
 
-    economies, projects = _discover(db, daos_collection)
+    economies, projects, _ = _discover(db, daos_collection)
     papers = _papers(db, web3, daos_collection, economies, projects)
     addresses = list(papers.keys())
 

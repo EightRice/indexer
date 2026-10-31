@@ -6,6 +6,7 @@ import time
 from web3 import Web3
 from web3.exceptions import Web3RPCError
 from apps.homebase.paper import Paper as HomebasePaper
+import startup_cache
 from apps.homebase.config import EVENT_SIGNATURES
 
 def initialize(db, web3, network_config):
@@ -223,14 +224,17 @@ def run_historical_sync(db, web3, network_config, alert_func):
                             raise e
 
                 print(f"Phase 1 complete: Found {new_daos_found} new DAOs from wrapper events")
+                if new_daos_found:
+                    startup_cache.invalidate(db, ('daos', daos_collection.id))
 
             # ============================================================
             # PHASE 2: Sync events for all DAOs (existing + newly discovered)
             # ============================================================
             print("\n--- Phase 2: Syncing events for all DAOs ---")
 
-            # Reload DAOs from Firestore (now includes any newly discovered ones)
-            daos_in_db = list(daos_collection.stream())
+            # The DAOs, including any found above (read once and shared with the other apps' startup)
+            daos_in_db = startup_cache.dao_docs(daos_collection)
+            changed = False
             print(f"Found {len(daos_in_db)} DAOs in Firestore to sync.")
 
             # Adaptive chunk size - start conservative and learn what works
@@ -268,7 +272,7 @@ def run_historical_sync(db, web3, network_config, alert_func):
                     dao=dao_address
                 )
                 # The DAO's supermajority threshold, which the DAO scan below doesn't replay
-                dao_paper.refresh_supermajority()
+                dao_paper.refresh_supermajority(known=dao_data.get('supermajorityBps'))
 
                 dao_contract = dao_paper.get_contract()
                 token_contract = token_paper.get_contract()
@@ -365,20 +369,10 @@ def run_historical_sync(db, web3, network_config, alert_func):
 
                 print(f"  Found {len(all_events)} events to process")
 
-                # Get existing data from Firestore
-                existing_proposals = {}
-                existing_votes = {}
-                existing_members = {}
-
-                proposals_ref = daos_collection.document(dao_address).collection('proposals')
-                for prop_doc in proposals_ref.stream():
-                    existing_proposals[prop_doc.id] = prop_doc.to_dict()
-
-                members_ref = daos_collection.document(dao_address).collection('members')
-                for member_doc in members_ref.stream():
-                    existing_members[member_doc.id] = member_doc.to_dict()
-
-                print(f"  Existing in Firestore: {len(existing_proposals)} proposals, {len(existing_members)} members")
+                # Handlers are idempotent: a proposal or vote already indexed is skipped by the handler
+                # itself (create() for proposals, the vote document for votes), so nothing is pre-read
+                if all_events:
+                    changed = True
 
                 # Process events chronologically
                 events_processed = 0
@@ -388,18 +382,11 @@ def run_historical_sync(db, web3, network_config, alert_func):
                             token_paper.delegate(event)
                             events_processed += 1
                         elif event_type == 'ProposalCreated':
-                            proposal_id = str(event['args']['proposalId'])
-                            if proposal_id not in existing_proposals:
-                                dao_paper.propose(event)
-                                events_processed += 1
+                            dao_paper.propose(event)
+                            events_processed += 1
                         elif event_type == 'VoteCast':
-                            proposal_id = str(event['args']['proposalId'])
-                            voter = Web3.to_checksum_address(event['args']['voter'])
-                            # Check if vote already exists
-                            vote_ref = proposals_ref.document(proposal_id).collection('votes').document(voter)
-                            if not vote_ref.get().exists:
-                                dao_paper.vote(event)
-                                events_processed += 1
+                            dao_paper.vote(event)
+                            events_processed += 1
                         elif event_type == 'ProposalQueued':
                             dao_paper.queue(event)
                             events_processed += 1
@@ -422,6 +409,10 @@ def run_historical_sync(db, web3, network_config, alert_func):
                         print(f"  - ERROR processing {event_type} event at block {event['blockNumber']}: {e}")
 
                 print(f"  Processed {events_processed} new/updated events for DAO {dao_address}")
+
+            # Events may have changed DAO documents (registry, economy) the other apps read next
+            if changed:
+                startup_cache.invalidate(db, ('daos', daos_collection.id))
 
             # Debates, which the DAO scan above doesn't cover
             try:
@@ -451,10 +442,8 @@ def _debate_papers(db, web3, daos_collection, factory):
         return papers
     factory = Web3.to_checksum_address(factory)
     papers[factory] = HomebasePaper(address=factory, kind="debates_factory", daos_collection=daos_collection, db=db, web3=web3)
-    for doc in db.collection_group('debates').stream():
+    for doc in startup_cache.subcollection_docs(db, daos_collection.id, 'debates'):
         dao_ref = doc.reference.parent.parent
-        if dao_ref is None or dao_ref.parent.id != daos_collection.id:
-            continue
         address = Web3.to_checksum_address(doc.id)
         papers[address] = HomebasePaper(address=address, kind="debate", daos_collection=daos_collection, db=db,
                                         web3=web3, dao=dao_ref.id)
@@ -486,6 +475,7 @@ def _sync_debates(db, web3, daos_collection, factory, from_block, to_block):
             result = paper.handle_event(log, func=name)
             for item in result or []:
                 if item[0] == 'debate' and item[1] not in papers:
+                    startup_cache.invalidate(db, ('group', daos_collection.id, 'debates'))
                     papers[item[1]] = HomebasePaper(address=item[1], kind="debate", daos_collection=daos_collection,
                                                     db=db, web3=web3, dao=item[2])
                     # Its root argument was emitted earlier in the same block range
@@ -494,6 +484,40 @@ def _sync_debates(db, web3, daos_collection, factory, from_block, to_block):
                         if early_name:
                             papers[item[1]].handle_event(early, func=early_name)
         block = end + 1
+
+
+BALANCE_SORT_FLAG = 'membersBalanceSort'
+
+
+def _backfill_balance_sort(db, daos_collection, dao_docs, contracts_ref):
+    """Once per network: give every member doc written before balanceSort existed its numeric balance,
+    so apps can list the largest holders with an ordered, limited query. Reads each member once (the
+    only time the indexer reads every member), writes those missing the field, then flags the network
+    in its contracts doc so it never runs again. New and updated member docs carry it already."""
+    from apps.homebase.entities import balance_sort
+    print("[homebase] One-time backfill of members' balanceSort...")
+    written = 0
+    batch, pending = db.batch(), 0
+    try:
+        for dao_doc in dao_docs:
+            for member in daos_collection.document(dao_doc.id).collection('members').stream():
+                data = member.to_dict() or {}
+                if 'balanceSort' in data:
+                    continue
+                batch.update(member.reference, {'balanceSort': balance_sort(data.get('personalBalance', '0'))})
+                pending += 1
+                if pending == 400:
+                    batch.commit()
+                    written += pending
+                    batch, pending = db.batch(), 0
+        if pending:
+            batch.commit()
+            written += pending
+        contracts_ref.set({BALANCE_SORT_FLAG: True}, merge=True)
+        print(f"[homebase] balanceSort backfilled on {written} member docs")
+    except Exception as e:
+        # Not flagged: retried at the next start
+        print(f"[homebase] balanceSort backfill failed after {written} docs: {e}")
 
 
 def setup_papers(db, web3, network_config):
@@ -523,8 +547,10 @@ def setup_papers(db, web3, network_config):
     jurisdiction_factory_address = homebase_config.get('jurisdictionFactory')
 
     daos_collection = db.collection(dao_collection_name)
-    homebase_docs = list(daos_collection.stream())
+    homebase_docs = startup_cache.dao_docs(daos_collection)
     dao_addresses = [doc.id for doc in homebase_docs]
+    if not homebase_config.get(BALANCE_SORT_FLAG):
+        _backfill_balance_sort(db, daos_collection, homebase_docs, db.collection("contracts").document(doc_name))
 
     # Create Paper objects
     papers = {}
