@@ -17,3 +17,9 @@ dao.json
 .prod
 indexer_testnet.log
 indexer*.log
+
+# publisher
+publisher/worker/node_modules/
+publisher/worker/.wrangler/
+publisher/worker/.dev.vars
+.pytest_cache/

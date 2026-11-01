@@ -2,4 +2,4 @@ web3
 firebase-admin
 pyyaml
 python-dotenv
-EOF
+boto3

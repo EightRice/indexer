@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `wrangler dev`. Must match the publisher's NOTIFY_SECRET.
+NOTIFY_SECRET=dev-secret
+# Optional, during rotation only: the previous secret, still accepted.
+# NOTIFY_SECRET_PREV=old-dev-secret

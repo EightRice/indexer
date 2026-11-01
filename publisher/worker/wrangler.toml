@@ -1,0 +1,20 @@
+# live.autonet.computer: Worker + Channel Durable Object (CONTRACT.md section 7).
+# Nothing here is deployed by the tests; `wrangler deploy` is a manual, owner-run step.
+name = "autonet-live"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = false
+routes = [{ pattern = "live.autonet.computer", custom_domain = true }]
+
+[[durable_objects.bindings]]
+name = "CHANNEL"
+class_name = "Channel"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Channel"]
+
+# Secrets (not in this file):
+#   npx wrangler secret put NOTIFY_SECRET
+#   npx wrangler secret put NOTIFY_SECRET_PREV   (only during rotation)
+# Locally they come from .dev.vars (see .dev.vars.example).
