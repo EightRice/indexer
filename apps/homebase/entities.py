@@ -203,6 +203,8 @@ class Proposal:
             'callDatas': self.callDatas,
             'targets': self.targets,
             'totalSupply': self.totalSupply,
+            'votingStartsBlock': self.votingStartsBlock,
+            'votingEndsBlock': self.votingEndsBlock,
             'values': self.values,
             'executionHash': self.executionHash,
             'statusHistory': self.statusHistory,
