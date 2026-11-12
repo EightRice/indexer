@@ -4,8 +4,8 @@
 enabled_apps:
   - homebase
   # - afterme  # Disabled by default - not live yet
-  - trustless
-  - autonet  # Substrate.sol agent directory -> autonet-275416 Firestore
+  # - trustless  # Retired 2026-11-12: the trustless app (trustless-58262) is being retired
+  # - autonet  # Retired 2026-11-12: nothing reads the autonet-275416 agents mirror
 
 # You can add more apps here as they become available
 # Example:
